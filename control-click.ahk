@@ -3,7 +3,7 @@
 
 ; 远程操控模式: 按截图坐标点击花妖窗口, 点击后自动重新截图形成反馈闭环
 ; 用法: control-click.ahk <sx> <sy>
-;   sx/sy 为截图像素坐标, 原点 = 窗口左上角(即 screenshots\control\control.png 内的坐标)
+;   sx/sy 为截图像素坐标, 原点 = 窗口左上角(即 screenshots\control.png 内的坐标)
 ;   脚本会重新读取窗口矩形, 把截图坐标映射为屏幕坐标后执行点击
 #Include garden-lib.ahk
 

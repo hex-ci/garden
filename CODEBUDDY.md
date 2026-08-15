@@ -13,7 +13,7 @@
 - **启动服务**：`npm start`（等价于 `node server.js`）。监听 `0.0.0.0:13000`（可用 `.env` 或环境变量 `PORT`/`HOST` 覆盖），浏览器访问 `http://localhost:13000`。无需 `npm install`。本地配置统一放 `.env`（零依赖加载器，已被 .gitignore 排除），模板见 `.env.example`。
 - **无测试、无 Lint、无构建步骤**：前端是纯静态 `index.html`，后端是无依赖的 Node 原生 `http` 模块，没有测试框架或构建链。
 - **改代码后需重启服务才生效**：结束旧 node 进程（`Get-CimInstance Win32_Process -Filter "Name='node.exe'"` 找到 server.js 的 PID，`Stop-Process`）再 `node server.js`。
-- **手动运行 AHK 脚本调试**：可 `AutoHotkey.exe control-shot.ahk` 单独跑，脚本会把结果写入 `screenshots/control/` 下的 JSON，方便检查。
+- **手动运行 AHK 脚本调试**：可 `AutoHotkey.exe control-shot.ahk` 单独跑，脚本会把结果写入 `screenshots/` 下的 JSON，方便检查。
 
 ## 架构
 
@@ -22,7 +22,7 @@
 核心架构是 **Node.js 后端 ↔ 文件系统 ↔ AHK 脚本** 的松耦合协作，没有共享内存或 IPC，一切状态通过文件传递：
 
 1. **Node.js 后端 (`server.js`)** 提供 REST API，收到请求后 `spawn` 一个对应的 AHK 脚本，等待进程退出后读取结果文件拼装响应。
-2. **AHK 脚本** 执行真实窗口操作（截图 / 点击），结束前把窗口矩形和操作结果写入 `screenshots/control/control-meta.json`（截图写入 `control.png`）。
+2. **AHK 脚本** 执行真实窗口操作（截图 / 点击），结束前把窗口矩形和操作结果写入 `screenshots/control-meta.json`（截图写入 `screenshots/control.png`）。
 3. **后端读取 meta 文件**，返回给前端。AHK 写的 JSON 带 UTF-8 BOM，后端 `readControlMeta` 先剥离 `\uFEFF` 再 `JSON.parse`。
 
 关键点：**AHK 脚本是"一次性执行"的**（`#SingleInstance Off`，跑完即退出），每次 API 调用都重新 spawn 一个新进程。后端用 30 秒超时兜底，避免脚本卡死导致请求挂起。脚本 `#Include garden-lib.ahk`，库内部自动 `#Include image-put.ahk`。
@@ -31,7 +31,7 @@
 
 - `POST /api/control/shot` → 运行 `control-shot.ahk`，把花妖窗口置于前台并截图。
 - `POST /api/control/click` → 接收 `{x, y}`（截图像素坐标），运行 `control-click.ahk <x> <y>` 执行点击。
-- `POST /api/control/input` → 接收 `{x, y, text, clear}`（截图像素坐标 + 文本 + 是否清空），先把 `text` 写入 `screenshots/control/input-text.txt`（UTF-8 无 BOM，避免命令行转义），再运行 `control-input.ahk <x> <y> <clear>` 输入文本。
+- `POST /api/control/input` → 接收 `{x, y, text, clear}`（截图像素坐标 + 文本 + 是否清空），先把 `text` 写入 `screenshots/input-text.txt`（UTF-8 无 BOM，避免命令行转义），再运行 `control-input.ahk <x> <y> <clear>` 输入文本。
 - `GET /api/control/screenshot` → 返回最新 `control.png`。
 
 **坐标映射机制**：`control-shot.ahk` 把窗口矩形 `(x, y, w, h)` 写入 `control-meta.json`；前端拿到矩形后在截图内计算点击的"截图像素坐标"并传给后端；`control-click.ahk` 重新读取窗口当前位置，把截图像素坐标加上窗口偏移映射为屏幕坐标再点击，随后自动重新截图形成"所见即所得"反馈闭环。因此**窗口移动不影响坐标映射正确性**。

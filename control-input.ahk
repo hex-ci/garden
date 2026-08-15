@@ -3,9 +3,9 @@
 
 ; 远程操控模式: 向花妖窗口的输入框输入文本
 ; 用法: control-input.ahk <sx> <sy> <clear>
-;   sx/sy 为截图像素坐标(目标输入框位置), 原点 = 窗口左上角(即 control.png 内的坐标)
+;   sx/sy 为截图像素坐标(目标输入框位置), 原点 = 窗口左上角(即 screenshots\control.png 内的坐标)
 ;   clear=1 先 Ctrl+A 全选再粘贴(覆盖原内容); clear=0 定位到文本末尾追加
-;   待输入文本从 screenshots\control\input-text.txt 读取(UTF-8 无 BOM, 由后端写入)
+;   待输入文本从 screenshots\input-text.txt 读取(UTF-8 无 BOM, 由后端写入)
 #Include garden-lib.ahk
 
 DryRun := false
@@ -43,7 +43,7 @@ if !EnsureHuaYaoWindow(&wx, &wy, &ww, &wh, &errMsg) {
 }
 
 ; 读取待输入文本(后端通过临时文件传递, 避免命令行转义问题, 支持任意字符)
-textFile := A_ScriptDir "\screenshots\control\input-text.txt"
+textFile := A_ScriptDir "\screenshots\input-text.txt"
 if !FileExist(textFile) {
     WriteControlMeta(0, 0, 0, 0, false, "找不到文本文件")
     ExitApp(2)

@@ -51,12 +51,11 @@ const AHK = (function findAhk() {
 })();
 
 // ---- 远程操控模式: 截图 + 坐标点击 ----
-const CONTROL_DIR = path.join(SCREENSHOTS_DIR, 'control');
-const CONTROL_IMG = path.join(CONTROL_DIR, 'control.png');
-const CONTROL_META = path.join(CONTROL_DIR, 'control-meta.json');
-const CONTROL_TEXT = path.join(CONTROL_DIR, 'input-text.txt'); // 文本输入: 后端写、AHK 读的临时文本文件
+const CONTROL_IMG = path.join(SCREENSHOTS_DIR, 'control.png');
+const CONTROL_META = path.join(SCREENSHOTS_DIR, 'control-meta.json');
+const CONTROL_TEXT = path.join(SCREENSHOTS_DIR, 'input-text.txt'); // 文本输入: 后端写、AHK 读的临时文本文件
 
-if (!fs.existsSync(CONTROL_DIR)) fs.mkdirSync(CONTROL_DIR, { recursive: true });
+if (!fs.existsSync(SCREENSHOTS_DIR)) fs.mkdirSync(SCREENSHOTS_DIR, { recursive: true });
 
 function readControlMeta() {
   try {

@@ -2,7 +2,7 @@
 #SingleInstance Off
 
 ; 远程操控模式: 把花妖窗口置于前台并截图
-; 输出: screenshots\control\control.png + screenshots\control\control-meta.json(窗口矩形)
+; 输出: screenshots\control.png + screenshots\control-meta.json(窗口矩形)
 ; 供网页操控界面显示画面并映射点击坐标
 #Include garden-lib.ahk
 

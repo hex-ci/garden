@@ -256,13 +256,13 @@ EnsureScreenshotDir() {
 }
 
 ; ===== 远程操控模式辅助 =====
-; 截图保存到 screenshots\control\control.png, 窗口矩形写入 screenshots\control\control-meta.json
+; 截图保存到 screenshots\control.png, 窗口矩形写入 screenshots\control-meta.json
 ; 供 Node.js 后端读取窗口矩形, 将截图坐标映射为屏幕坐标执行点击
 ;
 ; @param x, y, w, h 窗口在屏幕上的位置与尺寸(像素)
 ; @returns 成功返回 true
 SaveControlScreenshot(x, y, w, h) {
-    dir := A_ScriptDir "\screenshots\control"
+    dir := A_ScriptDir "\screenshots"
     if !DirExist(dir)
         try DirCreate(dir)
     filepath := dir "\control.png"
@@ -280,7 +280,7 @@ SaveControlScreenshot(x, y, w, h) {
  * @param message 操作描述(如"截图成功"/"已点击 (x, y)")
  */
 WriteControlMeta(x, y, w, h, ok, message) {
-    dir := A_ScriptDir "\screenshots\control"
+    dir := A_ScriptDir "\screenshots"
     if !DirExist(dir)
         try DirCreate(dir)
     filepath := dir "\control-meta.json"
