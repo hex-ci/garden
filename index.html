@@ -1,0 +1,597 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
+<title>花妖 · 操控台</title>
+<style>
+  :root {
+    --bg1: #1e293b; --bg2: #0f172a;
+    --line: rgba(255,255,255,.12); --txt: #e2e8f0; --muted: #94a3b8;
+    --blue: #38bdf8; --green: #22c55e; --red: #ef4444; --amber: #f59e0b;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; margin: 0; overscroll-behavior: none; }
+  body {
+    height: 100vh; height: 100dvh; overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: radial-gradient(1200px 600px at 50% -10%, #33415533, transparent),
+      linear-gradient(160deg, var(--bg1), var(--bg2));
+    color: var(--txt);
+    user-select: none; -webkit-user-select: none;
+  }
+  button { font-family: inherit; touch-action: manipulation; }
+
+  .app { display: flex; flex-direction: column; height: 100%; padding: env(safe-area-inset-top) 0 0; gap: 0; }
+
+  /* ===== 顶栏 ===== */
+  .topbar {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    padding: 8px 14px; padding-bottom: 6px; flex-wrap: nowrap;
+  }
+  .brand { display: flex; align-items: center; gap: 8px; font-size: 16px; font-weight: 800; flex: 1 1 auto; min-width: 0; }
+  .brand .bt { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  .brand small { display: block; font-size: 10px; color: var(--muted); font-weight: 400; }
+  .help-btn {
+    flex: none; width: 34px; height: 34px; border-radius: 50%;
+    border: 1px solid var(--line); background: rgba(255,255,255,.08);
+    color: var(--blue); font-size: 17px; font-weight: 800; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .help-btn:active { background: rgba(56,189,248,.25); }
+  .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; background: var(--gray,#64748b); }
+  .dot.ready { background: var(--green); animation: pulse 1.8s infinite; }
+  .dot.err { background: var(--red); }
+  @keyframes pulse { 0%{box-shadow:0 0 0 0 rgba(34,197,94,.5);} 70%{box-shadow:0 0 0 8px rgba(34,197,94,0);} 100%{box-shadow:0 0 0 0 rgba(34,197,94,0);} }
+
+  /* ===== 画布 ===== */
+  .stage { position: relative; flex: 1 1 auto; min-height: 0; overflow: hidden; background: #000; }
+  .viewport { position: absolute; inset: 0; overflow: hidden; touch-action: none; }
+  #ctrlImg {
+    position: absolute; left: 0; top: 0; transform-origin: 0 0; display: none;
+    user-select: none; -webkit-user-drag: none; pointer-events: none;
+  }
+  .empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 15px; text-align: center; padding: 20px; z-index: 1; }
+  .loading { position: absolute; inset: 0; z-index: 3; display: none; align-items: center; justify-content: center; background: rgba(0,0,0,.55); }
+  .loading.on { display: flex; }
+  .spinner { width: 40px; height: 40px; border-radius: 50%; border: 4px solid #ffffff22; border-top-color: var(--blue); animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ===== 虚拟光标(手动模式) ===== */
+  .vcursor {
+    position: absolute; z-index: 7; display: none; pointer-events: none;
+    transform: translate(-50%,-50%);
+  }
+  .vcursor.on { display: block; }
+  .vcursor .ring {
+    width: 26px; height: 26px; border-radius: 50%;
+    border: 2.5px solid var(--green);
+    background: rgba(34,197,94,.15);
+    box-shadow: 0 0 0 1px rgba(0,0,0,.6), 0 0 12px rgba(34,197,94,.6);
+    position: relative;
+  }
+  .vcursor .ring::before, .vcursor .ring::after {
+    content: ''; position: absolute; background: var(--green);
+    box-shadow: 0 0 4px rgba(0,0,0,.8);
+  }
+  .vcursor .ring::before { left: 50%; top: -7px; width: 2px; height: 40px; transform: translateX(-50%); }
+  .vcursor .ring::after { top: 50%; left: -7px; height: 2px; width: 40px; transform: translateY(-50%); }
+  .vcursor .label {
+    position: absolute; left: 50%; top: calc(100% + 8px); transform: translateX(-50%);
+    background: rgba(0,0,0,.85); border: 1px solid var(--green);
+    color: #7dd3fc; font-size: 11px; font-family: ui-monospace,Consolas,monospace;
+    padding: 2px 7px; border-radius: 6px; white-space: nowrap;
+  }
+
+  .ripple { position: absolute; z-index: 4; pointer-events: none; width: 0; height: 0; border-radius: 50%; background: rgba(56,189,248,.65); transform: translate(-50%,-50%); }
+  .ripple.go { animation: ripple .5s ease-out forwards; }
+  @keyframes ripple { from{width:0;height:0;opacity:.85;} to{width:56px;height:56px;opacity:0;} }
+
+  /* ===== 底部操作区 ===== */
+  .bottom {
+    background: rgba(15,23,42,.92); border-top: 1px solid var(--line);
+    padding: 8px 12px; padding-bottom: max(env(safe-area-inset-bottom), 8px);
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .bar { display: flex; align-items: center; gap: 8px; }
+  .tb-btn {
+    min-width: 44px; height: 46px; border-radius: 12px; border: 1px solid var(--line);
+    background: rgba(255,255,255,.06); color: var(--txt); cursor: pointer;
+    font-size: 20px; font-weight: 700; display: flex; align-items: center; justify-content: center;
+    flex: 1; max-width: 56px;
+  }
+  .tb-btn:active { background: rgba(56,189,248,.25); }
+  .tb-btn:disabled { opacity: .35; }
+  .tb-val { min-width: 52px; height: 46px; border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; color: var(--blue); font-family: ui-monospace,Consolas,monospace; flex: 1; max-width: 60px; }
+
+  /* 模式切换 */
+  .mode-btn {
+    height: 46px; border-radius: 12px; border: 1px solid var(--line);
+    background: rgba(255,255,255,.06); color: var(--txt); cursor: pointer;
+    font-size: 13px; font-weight: 800; display: flex; align-items: center; justify-content: center;
+    flex: 1.4; max-width: 110px; gap: 5px;
+  }
+  .mode-btn.on { border-color: var(--green); background: rgba(34,197,94,.16); color: var(--green); }
+
+  /* 确认点击大按钮(手动模式) */
+  .click-btn {
+    height: 54px; flex: 1; min-width: 0; border: none; border-radius: 16px;
+    background: linear-gradient(135deg,#16a34a,#22c55e);
+    color: #fff; font-size: 20px; font-weight: 900; cursor: pointer;
+    display: none; align-items: center; justify-content: center; gap: 8px;
+    box-shadow: 0 4px 18px rgba(34,197,94,.35);
+  }
+  .click-btn:active { filter: brightness(1.15); transform: translateY(1px); }
+  .click-btn:disabled { opacity: .5; }
+
+  /* 输入大按钮(常驻,与点击按钮并排) */
+  .input-btn {
+    height: 54px; flex: 1; min-width: 0; border-radius: 16px;
+    border: 1px solid rgba(56,189,248,.4);
+    background: linear-gradient(135deg,#0284c7,#38bdf8);
+    color: #fff; font-size: 17px; font-weight: 800; cursor: pointer;
+    display: flex; align-items: center; justify-content: center; gap: 6px;
+    box-shadow: 0 4px 18px rgba(56,189,248,.28);
+  }
+  .input-btn:active { filter: brightness(1.15); transform: translateY(1px); }
+  .input-btn:disabled { opacity: .45; box-shadow: none; }
+
+  /* ===== 状态/提示 ===== */
+  .statusbar { display: none; }
+  .toast {
+    position: fixed; left: 50%; bottom: calc(env(safe-area-inset-bottom) + 96px);
+    transform: translateX(-50%); z-index: 40;
+    background: rgba(0,0,0,.88); color: #fff; font-size: 13px; font-weight: 600;
+    padding: 9px 16px; border-radius: 22px; border: 1px solid var(--line);
+    opacity: 0; pointer-events: none; transition: opacity .25s; max-width: 86vw; text-align: center;
+  }
+  .toast.show { opacity: 1; }
+
+  /* ===== 桌面增强 ===== */
+  @media (min-width: 640px) and (hover: hover) and (pointer: fine) {
+    .app { padding: 12px 16px; gap: 8px; }
+    .topbar { padding: 0 2px; }
+    .stage { border: 1px solid var(--line); border-radius: 16px; }
+    .statusbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 12px; color: var(--muted); padding: 0 4px; }
+    .statusbar .meta { font-family: ui-monospace,Consolas,monospace; color: #7dd3fc; white-space: nowrap; }
+    .statusbar .meta b { color: var(--amber); font-weight: 600; }
+    .bottom { border: 1px solid var(--line); border-radius: 16px; background: rgba(255,255,255,.04); }
+    .click-btn { min-width: 220px; }
+  }
+
+  /* ===== 帮助弹层 ===== */
+  .modal { position: fixed; inset: 0; z-index: 30; display: none; align-items: flex-end; justify-content: center; background: rgba(0,0,0,.5); }
+  .modal.show { display: flex; }
+  .modal-card {
+    width: 100%; max-width: 560px; max-height: 78vh; overflow-y: auto;
+    background: #0f172a; border-top: 1px solid var(--line); border-radius: 18px 18px 0 0;
+    padding: 20px 20px max(env(safe-area-inset-bottom), 20px);
+  }
+  .modal-card h3 { margin: 0 0 12px; font-size: 16px; color: var(--txt); display: flex; justify-content: space-between; align-items: center; }
+  .modal-card h3 button {
+    width: 34px; height: 34px; border-radius: 50%; border: 1px solid var(--line);
+    background: rgba(255,255,255,.08); color: var(--txt); font-size: 16px; cursor: pointer;
+  }
+  .help-row { display: flex; gap: 10px; align-items: baseline; padding: 7px 0; font-size: 14px; color: #cbd5e1; }
+  .help-row .k {
+    flex: none; min-width: 84px; text-align: center; font-weight: 700;
+    background: #ffffff10; border: 1px solid var(--line); border-radius: 7px;
+    padding: 3px 8px; font-size: 12px; color: var(--blue); white-space: nowrap;
+  }
+  .help-row .d { color: var(--muted); font-size: 13px; }
+
+  /* ===== 文本输入面板(底部弹出) ===== */
+  .input-card { padding-bottom: max(env(safe-area-inset-bottom), 16px); }
+  .input-card .tips { font-size: 12px; color: var(--muted); margin: -6px 2px 12px; }
+  #inputArea {
+    width: 100%; min-height: 92px; max-height: 40vh; resize: vertical; padding: 12px 14px;
+    background: rgba(255,255,255,.06); border: 1px solid var(--line); border-radius: 14px;
+    color: var(--txt); font-size: 16px; line-height: 1.55; font-family: inherit; outline: none;
+  }
+  #inputArea:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(56,189,248,.18); }
+  #inputArea::placeholder { color: var(--muted); }
+  .clear-row {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: 12px 2px; font-size: 14px; color: #cbd5e1;
+  }
+  .clear-row .hint { display: block; font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .switch { position: relative; width: 48px; height: 28px; flex: none; }
+  .switch input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; z-index: 1; }
+  .switch i { position: absolute; inset: 0; border-radius: 14px; background: rgba(255,255,255,.14); transition: background .2s; pointer-events: none; }
+  .switch i::after { content: ''; position: absolute; left: 3px; top: 3px; width: 22px; height: 22px; border-radius: 50%; background: #cbd5e1; transition: transform .2s; }
+  .switch input:checked + i { background: var(--green); }
+  .switch input:checked + i::after { transform: translateX(20px); background: #fff; }
+  .input-actions { display: flex; gap: 10px; margin-top: 8px; }
+  .input-actions button { height: 52px; border-radius: 14px; font-size: 17px; font-weight: 800; cursor: pointer; flex: 1; }
+  #inputCancel { background: rgba(255,255,255,.08); border: 1px solid var(--line); color: var(--txt); }
+  #inputSend {
+    background: linear-gradient(135deg,#16a34a,#22c55e); border: none; color: #fff;
+    box-shadow: 0 4px 18px rgba(34,197,94,.35);
+    display: flex; align-items: center; justify-content: center; gap: 6px;
+  }
+  #inputSend:active, #inputCancel:active { filter: brightness(1.15); transform: translateY(1px); }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="topbar">
+    <div class="brand"><span id="dot" class="dot"></span><div class="bt">花妖 · 操控台<small id="sub">直接点击模式</small></div></div>
+    <button class="help-btn" id="helpBtn" title="操作说明">?</button>
+  </div>
+
+  <div class="stage" id="stage">
+    <div class="viewport" id="viewport">
+      <img id="ctrlImg" alt="花妖画面" draggable="false" />
+      <div class="vcursor" id="vcursor"><div class="ring"></div><div class="label" id="vlabel"></div></div>
+      <div class="ripple" id="ripple"></div>
+    </div>
+    <div class="empty" id="empty">正在获取花妖画面…</div>
+    <div class="loading" id="loading"><div class="spinner"></div></div>
+  </div>
+
+  <div class="bottom">
+    <div class="bar">
+      <button class="tb-btn" id="refreshBtn" title="刷新">⟳</button>
+      <button class="tb-btn" id="zoomOutBtn" title="缩小">−</button>
+      <div class="tb-val" id="zoomVal">100%</div>
+      <button class="tb-btn" id="zoomInBtn" title="放大">＋</button>
+      <button class="tb-btn" id="resetBtn" title="复位">⤾</button>
+      <button class="mode-btn" id="modeBtn">🖐 手动</button>
+    </div>
+    <div class="bar">
+      <button class="input-btn" id="inputBtn" title="文本输入">⌨ 输入</button>
+      <button class="click-btn" id="clickBtn">🖱 点击</button>
+    </div>
+  </div>
+
+  <div class="statusbar">
+    <div class="msg" id="msg"></div>
+    <div class="meta" id="meta"></div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<div class="modal" id="helpModal">
+  <div class="modal-card">
+    <h3>操作说明 <button id="helpClose">×</button></h3>
+    <div class="help-row"><span class="k">直接点击</span><span class="d">默认模式：点画面哪里，就点击花妖哪里（所见即所得）</span></div>
+    <div class="help-row"><span class="k">手动点击</span><span class="d">按「🖐 手动」切换：手指拖动绿色光标定位，再按底部「点击」按钮确认</span></div>
+    <div class="help-row"><span class="k">缩放/平移</span><span class="d">双指捏合缩放；放大后单指或双指拖动即可平移画面</span></div>
+    <div class="help-row"><span class="k">+ − ⤾ ⟳</span><span class="d">底部工具条：放大 / 缩小 / 复位视图 / 刷新画面</span></div>
+    <div class="help-row"><span class="k">⌨ 输入</span><span class="d">先点击画面选中目标输入框，再点「输入」打开面板；回车(或发送键)确认，「清空」开关可覆盖原内容</span></div>
+  </div>
+</div>
+
+<div class="modal" id="inputModal" role="dialog" aria-modal="true" aria-label="向花妖输入文本">
+  <div class="modal-card input-card" id="inputCard">
+    <h3>向花妖输入文本 <button id="inputClose" aria-label="关闭">×</button></h3>
+    <div class="tips">文本将发送到之前点击选中的输入框 · 回车发送 · Shift+回车换行</div>
+    <textarea id="inputArea" rows="3" placeholder="输入要发送到已选中输入框的文本…" enterkeyhint="send" aria-label="要发送的文本"></textarea>
+    <label class="clear-row">
+      <span>发送前清空原有内容<span class="hint">关闭 = 追加到末尾 · 打开 = 覆盖原内容</span></span>
+      <span class="switch"><input type="checkbox" id="clearSwitch"><i></i></span>
+    </label>
+    <div class="input-actions">
+      <button id="inputCancel">取消</button>
+      <button id="inputSend">发送</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  const $ = id => document.getElementById(id);
+  const dot=$('dot'), sub=$('sub'), stage=$('stage'), viewport=$('viewport'), img=$('ctrlImg'),
+    empty=$('empty'), loading=$('loading'), msg=$('msg'), meta=$('meta'),
+    vcursor=$('vcursor'), vlabel=$('vlabel'), ripple=$('ripple'),
+    zoomInBtn=$('zoomInBtn'), zoomOutBtn=$('zoomOutBtn'), resetBtn=$('resetBtn'),
+    refreshBtn=$('refreshBtn'), zoomVal=$('zoomVal'), clickBtn=$('clickBtn'),
+    modeBtn=$('modeBtn'), toastEl=$('toast'),
+    helpModal=$('helpModal'), helpBtn=$('helpBtn'), helpClose=$('helpClose'),
+    inputBtn=$('inputBtn'), inputModal=$('inputModal'), inputCard=$('inputCard'),
+    inputClose=$('inputClose'), inputCancel=$('inputCancel'), inputSend=$('inputSend'),
+    inputArea=$('inputArea'), clearSwitch=$('clearSwitch');
+
+  // ===== 状态 =====
+  let rect=null, imgNatural=null, busy=false, tok=0, zoom=1;
+  let target=null;   // 最近一次点击的截图像素坐标 = 目标输入框位置(文本输入焦点管理依据)
+  const ZOOM_MIN=0.5, ZOOM_MAX=8;
+  let pan={x:0,y:0}, cursor=null;
+  let manual=false;   // false=直接点击, true=手动点击
+  const fine = window.matchMedia('(hover: hover) and (pointer: fine)').matches;
+
+  function toast(t){ toastEl.textContent=t; toastEl.classList.add('show'); clearTimeout(toastEl._t); toastEl._t=setTimeout(()=>toastEl.classList.remove('show'),1800); }
+  function setBusy(b){ busy=b; loading.classList.toggle('on', b); }
+  function setReady(ok){ dot.className='dot '+(ok?'ready':'err'); }
+
+  // ===== 模式切换 =====
+  function applyMode(){
+    const isManual = manual;
+    modeBtn.classList.toggle('on', isManual);
+    modeBtn.textContent = isManual ? '🖐 手动' : '⚡ 直接';
+    sub.textContent = isManual ? '手动点击模式' : '直接点击模式';
+    clickBtn.style.display = isManual ? 'flex' : 'none';
+    clickBtn.disabled = isManual && !cursor;
+    if (!isManual) vcursor.classList.remove('on');
+    else { ensureCursor(); updateCursor(); }
+    toast(isManual ? '已切换：手动点击模式（拖动光标→点击确认）' : '已切换：直接点击模式（点哪点哪）');
+  }
+
+  // ===== 渲染 =====
+  function renderInfo(){
+    if(!imgNatural) return null;
+    const vw=viewport.clientWidth, vh=viewport.clientHeight, nw=imgNatural.w, nh=imgNatural.h;
+    if(!nw||!nh||!vw||!vh) return null;
+    const fit=Math.min(vw/nw, vh/nh);
+    const dw=nw*fit*zoom, dh=nh*fit*zoom;
+    return { left:(vw-dw)/2+pan.x, top:(vh-dh)/2+pan.y, dispW:dw, dispH:dh, z:zoom, fit };
+  }
+  function applyTransform(){
+    const i=renderInfo(); if(!i||!imgNatural) return;
+    img.style.width=(imgNatural.w*i.fit)+'px';
+    img.style.height=(imgNatural.h*i.fit)+'px';
+    img.style.transform=`translate(${i.left}px,${i.top}px) scale(${i.z})`;
+    img.style.transformOrigin='0 0';
+    zoomVal.textContent=Math.round(i.z*100)+'%';
+    zoomInBtn.disabled=busy||i.z>=ZOOM_MAX;
+    zoomOutBtn.disabled=busy||i.z<=ZOOM_MIN;
+  }
+  function clampPan(){
+    const i=renderInfo(); if(!i) return;
+    const vw=viewport.clientWidth, vh=viewport.clientHeight;
+    // 图片显示偏移 = 居中偏移 + pan。画面大于视口时须保证图片完全覆盖视口:
+    //   left∈[vw-dispW, 0] => pan.x∈[(vw-dispW)/2, (dispW-vw)/2] = [cx, -cx]
+    const cx=(vw-i.dispW)/2, cy=(vh-i.dispH)/2;
+    pan.x = i.dispW<=vw ? 0 : Math.max(cx, Math.min(-cx, pan.x));
+    pan.y = i.dispH<=vh ? 0 : Math.max(cy, Math.min(-cy, pan.y));
+    applyTransform();
+  }
+  function centerView(){ pan={x:0,y:0}; zoom=1; applyTransform(); }
+  function zoomAt(cx,cy,d){
+    const i=renderInfo(); if(!i) return;
+    const oldZ=i.z; let nz=Math.max(ZOOM_MIN,Math.min(ZOOM_MAX,oldZ*d));
+    if(nz===oldZ) return;
+    const px=(cx-viewport.clientWidth/2-pan.x)/oldZ, py=(cy-viewport.clientHeight/2-pan.y)/oldZ;
+    pan.x=(cx-viewport.clientWidth/2)-px*nz; pan.y=(cy-viewport.clientHeight/2)-py*nz;
+    zoom=nz; clampPan(); if(manual) updateCursor();
+  }
+  function imgPixelFromClient(cx,cy){
+    const i=renderInfo(); if(!i||!imgNatural) return null;
+    const vr=viewport.getBoundingClientRect();
+    const px=(cx-vr.left-i.left)/(i.fit*i.z), py=(cy-vr.top-i.top)/(i.fit*i.z);
+    if(px<0||py<0||px>=imgNatural.w||py>=imgNatural.h) return null;
+    return { x:Math.round(px), y:Math.round(py) };
+  }
+
+  // ===== 虚拟光标 =====
+  function ensureCursor(){
+    if(!cursor || cursor.x<0 || cursor.y<0 || cursor.x>=imgNatural.w || cursor.y>=imgNatural.h){
+      cursor = imgNatural ? { x: Math.floor(imgNatural.w/2), y: Math.floor(imgNatural.h/2) } : null;
+    }
+  }
+  function updateCursor(){
+    if(!manual || !cursor || !imgNatural || img.style.display==='none'){ vcursor.classList.remove('on'); return; }
+    const i=renderInfo(); if(!i) return;
+    vcursor.style.left=(i.left+cursor.x*i.fit*i.z)+'px';
+    vcursor.style.top=(i.top+cursor.y*i.fit*i.z)+'px';
+    vcursor.classList.add('on');
+    let t='('+cursor.x+', '+cursor.y+')';
+    if(rect) t+=' → 屏幕('+(rect.x+cursor.x)+', '+(rect.y+cursor.y)+')';
+    vlabel.textContent=t;
+    clickBtn.disabled = busy;
+  }
+  function moveCursorTo(x,y){
+    if(!imgNatural) return;
+    cursor.x=Math.max(0,Math.min(imgNatural.w-1,Math.round(x)));
+    cursor.y=Math.max(0,Math.min(imgNatural.h-1,Math.round(y)));
+    updateCursor(); updateMeta();
+  }
+
+  function showImage(mt){
+    if(!mt) return; const t=++tok;
+    img.onload=()=>{
+      if(t!==tok) return;
+      imgNatural={w:img.naturalWidth,h:img.naturalHeight};
+      img.style.display='block'; empty.style.display='none';
+      inputBtn.disabled=false;
+      applyTransform(); if(manual) updateCursor();
+    };
+    img.src='/api/control/screenshot?t='+mt+'&r='+Math.random();
+  }
+  function updateMeta(){
+    meta.innerHTML = rect ? '窗口 <b>'+rect.w+'×'+rect.h+'</b>'+(cursor?' · 光标 <b>('+cursor.x+','+cursor.y+')</b>':'') : '';
+  }
+  function doShot(){
+    setBusy(true);
+    fetch('/api/control/shot',{method:'POST',cache:'no-store'})
+      .then(r=>r.json().catch(()=>({})))
+      .then(d=>{
+        if(!d.ok){ toast(d.message||'截图失败'); if(!rect){empty.style.display='flex';empty.textContent=d.message||'截图失败';} setReady(false); return; }
+        rect=d.rect; updateMeta(); setReady(true); if(d.screenshot) showImage(d.screenshot.mtimeMs);
+      })
+      .catch(()=>{ toast('请求失败'); setReady(false); })
+      .finally(()=>setBusy(false));
+  }
+  function rippleAt(sx,sy){
+    const i=renderInfo(); if(!i) return;
+    ripple.style.left=(i.left+sx*i.fit*i.z)+'px';
+    ripple.style.top=(i.top+sy*i.fit*i.z)+'px';
+    ripple.classList.remove('go'); void ripple.offsetWidth; ripple.classList.add('go');
+  }
+  function doClick(x,y){
+    setBusy(true); rippleAt(x,y); updateMeta();
+    target={x,y};   // 记住目标输入框位置(文本输入时先重定位到此处确保焦点)
+    fetch('/api/control/click',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({x,y}),cache:'no-store'})
+      .then(r=>r.json().catch(()=>({})))
+      .then(d=>{ if(!d.ok){ toast(d.message||'点击失败'); return; } rect=d.rect; updateMeta(); if(d.screenshot) showImage(d.screenshot.mtimeMs); })
+      .catch(()=>{ toast('请求失败'); })
+      .finally(()=>setBusy(false));
+  }
+
+  // ===== 触摸手势 =====
+  // 直接模式: 单指轻点=点击, 单指拖动=平移, 双指捏合=缩放(双指整体移动=平移)
+  // 手动模式: 单指拖动=移动光标(1:1), 双指捏合=缩放, 底部按钮=确认点击
+  let gesture=null;
+  viewport.addEventListener('touchstart',(e)=>{
+    if(busy) return;
+    if(e.touches.length===2){
+      const t1=e.touches[0], t2=e.touches[1];
+      gesture={type:'pinch',
+        d:Math.hypot(t1.clientX-t2.clientX, t1.clientY-t2.clientY), zoom,
+        midX:(t1.clientX+t2.clientX)/2, midY:(t1.clientY+t2.clientY)/2};
+    } else if(e.touches.length===1){
+      gesture={type: manual?'move':'tap', sx:e.touches[0].clientX, sy:e.touches[0].clientY, moved:false};
+    }
+  },{passive:false});
+  viewport.addEventListener('touchmove',(e)=>{
+    if(!gesture) return;
+    if(gesture.type==='pinch' && e.touches.length===2){
+      e.preventDefault();
+      const t1=e.touches[0], t2=e.touches[1];
+      const d=Math.hypot(t1.clientX-t2.clientX, t1.clientY-t2.clientY);
+      const midX=(t1.clientX+t2.clientX)/2, midY=(t1.clientY+t2.clientY)/2;
+      if(d>0 && gesture.d>0){
+        const vr=viewport.getBoundingClientRect();
+        zoomAt(midX-vr.left, midY-vr.top, d/gesture.d);   // 以两指中点为锚缩放
+      }
+      pan.x+=(midX-gesture.midX); pan.y+=(midY-gesture.midY);   // 双指整体位移 = 平移
+      gesture.d=d; gesture.midX=midX; gesture.midY=midY;
+      clampPan(); if(manual) updateCursor();
+    } else if(gesture.type==='move' && e.touches.length===1){
+      e.preventDefault();
+      const dx=e.touches[0].clientX-gesture.sx, dy=e.touches[0].clientY-gesture.sy;
+      const i=renderInfo();
+      if(i && imgNatural){
+        const imgDX=dx/(i.fit*i.z), imgDY=dy/(i.fit*i.z);
+        moveCursorTo(cursor.x+imgDX, cursor.y+imgDY);
+      }
+      gesture.sx=e.touches[0].clientX; gesture.sy=e.touches[0].clientY;
+      if(Math.abs(dx)+Math.abs(dy)>6) gesture.moved=true;
+    } else if(gesture.type==='tap'){
+      // 直接模式: 轻点=点击; 单指拖动(>8px)转为平移画面
+      const dx=e.touches[0].clientX-gesture.sx, dy=e.touches[0].clientY-gesture.sy;
+      if(Math.abs(dx)+Math.abs(dy)>8){
+        if(!gesture.panning){
+          gesture.panning=true;
+          gesture.px=pan.x; gesture.py=pan.y;   // 记录进入平移时的 pan
+        }
+        e.preventDefault();
+        pan.x=gesture.px+(e.touches[0].clientX-gesture.sx);
+        pan.y=gesture.py+(e.touches[0].clientY-gesture.sy);
+        clampPan();
+      }
+      gesture.moved=gesture.panning;
+    }
+  },{passive:false});
+  viewport.addEventListener('touchend',(e)=>{
+    if(!gesture) return;
+    if(gesture.type==='pinch' && e.touches.length<2){ clampPan(); gesture=null; return; }
+    if(gesture.type==='tap' && e.touches.length===0 && !gesture.moved && !busy && img.style.display!=='none'){
+      const t=e.changedTouches[0];
+      const p=imgPixelFromClient(t.clientX,t.clientY);
+      if(p) doClick(p.x,p.y);
+    }
+    if(gesture.type==='tap' && e.touches.length===0 && gesture.moved) clampPan();   // 拖动平移后收拢边界
+    if(e.touches.length===0) gesture=null;
+  });
+  viewport.addEventListener('touchcancel',()=>{ gesture=null; });
+
+  // ===== 桌面 =====
+  if(fine){
+    viewport.addEventListener('mousemove',(e)=>{
+      if(img.style.display==='none') return;
+      const p=imgPixelFromClient(e.clientX,e.clientY);
+      if(!p) return;
+      if(manual){ moveCursorTo(p.x,p.y); }
+      else { cursor={x:p.x,y:p.y}; updateMeta(); }
+    });
+    let drag=null, dragMoved=false;
+    viewport.addEventListener('click',(e)=>{
+      if(dragMoved){ dragMoved=false; return; }   // 拖动平移后的 click 不当作点击
+      if(busy||img.style.display==='none') return;
+      const p=imgPixelFromClient(e.clientX,e.clientY); if(p) doClick(p.x,p.y);
+    });
+    viewport.addEventListener('mousedown',(e)=>{ if(e.button!==0) return; drag={sx:e.clientX,sy:e.clientY,px:pan.x,py:pan.y}; dragMoved=false; e.preventDefault(); });
+    window.addEventListener('mousemove',(e)=>{
+      if(!drag) return;
+      pan.x=drag.px+(e.clientX-drag.sx); pan.y=drag.py+(e.clientY-drag.sy);
+      if(Math.abs(e.clientX-drag.sx)+Math.abs(e.clientY-drag.sy)>6) dragMoved=true;
+      clampPan();
+    });
+    window.addEventListener('mouseup',()=>{ drag=null; });
+    viewport.addEventListener('wheel',(e)=>{ e.preventDefault(); const vr=viewport.getBoundingClientRect(); zoomAt(e.clientX-vr.left,e.clientY-vr.top, e.deltaY<0?1.18:1/1.18); },{passive:false});
+  }
+
+  // ===== 底部按钮 =====
+  zoomInBtn.addEventListener('click',()=>zoomAt(viewport.clientWidth/2,viewport.clientHeight/2,1.25));
+  zoomOutBtn.addEventListener('click',()=>zoomAt(viewport.clientWidth/2,viewport.clientHeight/2,1/1.25));
+  resetBtn.addEventListener('click',()=>{ centerView(); });
+  refreshBtn.addEventListener('click',doShot);
+  modeBtn.addEventListener('click',()=>{ manual=!manual; applyMode(); });
+  clickBtn.addEventListener('click',()=>{ if(cursor) doClick(cursor.x,cursor.y); });
+
+  // ===== 文本输入 =====
+  const MAX_TEXT = 2000;
+  function openInput(){
+    if(!imgNatural || img.style.display==='none'){ toast('画面不可用，请先刷新'); return; }
+    if(!target){ toast('请先点击画面选中目标输入框'); return; }
+    inputArea.value=''; clearSwitch.checked=false;
+    inputModal.classList.add('show');
+    adjustInputPanel();
+    setTimeout(()=>inputArea.focus({preventScroll:true}), 90);
+  }
+  function closeInput(){ inputModal.classList.remove('show'); }
+  function sendInput(){
+    const text=inputArea.value.trim();
+    if(!text){ toast('请输入要发送的文本'); inputArea.focus(); return; }
+    if(text.length>MAX_TEXT){ toast('文本过长(最多 '+MAX_TEXT+' 字符)'); return; }
+    if(!target){ toast('请先点击画面选中目标输入框'); closeInput(); return; }
+    setBusy(true);
+    const clear=clearSwitch.checked;
+    fetch('/api/control/input',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({x:target.x,y:target.y,text,clear}),cache:'no-store'})
+      .then(r=>r.json().catch(()=>({})))
+      .then(d=>{
+        if(!d.ok){ toast(d.message||'输入失败'); return; }
+        rect=d.rect; updateMeta();
+        if(d.screenshot) showImage(d.screenshot.mtimeMs);
+        closeInput(); toast('文本已发送'+(clear?'(已清空)':''));
+      })
+      .catch(()=>{ toast('请求失败'); })
+      .finally(()=>setBusy(false));
+  }
+  inputBtn.addEventListener('click', openInput);
+  inputClose.addEventListener('click', closeInput);
+  inputCancel.addEventListener('click', closeInput);
+  inputSend.addEventListener('click', sendInput);
+  inputModal.addEventListener('click',(e)=>{ if(e.target===inputModal) closeInput(); });
+  // 回车/软键盘"发送"键确认; Shift+回车换行; 中文输入法组合阶段不误触发
+  inputArea.addEventListener('keydown',(e)=>{
+    if(e.key==='Enter' && !e.shiftKey && !e.isComposing){ e.preventDefault(); sendInput(); }
+  });
+  // 键盘弹出时把面板顶到键盘上方(visualViewport 适配, iOS 键盘覆盖 fixed 底部)
+  const vv = window.visualViewport;
+  function adjustInputPanel(){
+    if(!vv || !inputModal.classList.contains('show')) return;
+    const kb = window.innerHeight - vv.offsetTop - vv.height;
+    inputCard.style.marginBottom = (kb>0 ? kb : 0)+'px';
+  }
+  if(vv){ vv.addEventListener('resize', adjustInputPanel); vv.addEventListener('scroll', adjustInputPanel); }
+  window.addEventListener('resize', adjustInputPanel);
+
+  // ===== 帮助 =====
+  const openHelp=()=>helpModal.classList.add('show'), closeHelp=()=>helpModal.classList.remove('show');
+  helpBtn.addEventListener('click',openHelp);
+  helpClose.addEventListener('click',closeHelp);
+  helpModal.addEventListener('click',(e)=>{ if(e.target===helpModal) closeHelp(); });
+
+  // ===== 初始化 =====
+  applyMode();
+  inputBtn.disabled = true;   // 无画面时不可输入
+  doShot();
+  window.addEventListener('resize', applyTransform);
+  document.addEventListener('keydown',(e)=>{ if(e.key==='Escape'){ helpModal.classList.remove('show'); closeInput(); } });
+</script>
+</body>
+</html>

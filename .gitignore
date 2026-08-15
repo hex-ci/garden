@@ -1,0 +1,47 @@
+# ===== 本地环境配置 / 密钥(绝不提交) =====
+.env
+.env.*
+!.env.example
+*.local
+*.local.*
+config.local.*
+secrets.*
+credentials*
+
+# ===== 运行时数据(截图/坐标/输入文本, 可能包含个人或账号信息) =====
+screenshots/
+*.png
+*.jpg
+*.jpeg
+control-meta.json
+input-text.txt
+
+# ===== 日志 =====
+logs/
+*.log
+npm-debug.log*
+
+# ===== Node / 构建产物 =====
+node_modules/
+dist/
+build/
+coverage/
+*.tsbuildinfo
+
+# ===== 系统 / 编辑器 / IDE =====
+.DS_Store
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.codebuddy/
+
+# ===== 临时文件 =====
+*.tmp
+*.bak
+*.orig
+
+package-lock.json
