@@ -10,9 +10,6 @@ credentials*
 
 # ===== 运行时数据(截图/坐标/输入文本, 可能包含个人或账号信息) =====
 screenshots/
-*.png
-*.jpg
-*.jpeg
 control-meta.json
 input-text.txt
 
