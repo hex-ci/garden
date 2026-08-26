@@ -10,9 +10,9 @@
 
 ## 常用命令
 
-- **启动服务**：`npm start`（等价于 `node server.js`）。监听 `0.0.0.0:13000`（可用 `.env` 或环境变量 `PORT`/`HOST` 覆盖），浏览器访问 `http://localhost:13000`。无需 `npm install`。本地配置统一放 `.env`（零依赖加载器，已被 .gitignore 排除），模板见 `.env.example`。
+- **启动服务**：`npm start`（等价于 `node start.js`）。`start.js` 会检测是否管理员，非管理员在 Windows 下弹 UAC 提权后以管理员重新启动（因为更新花妖写防火墙规则需要管理员权限），之后加载 `server.js`。监听 `0.0.0.0:13000`（可用 `.env` 或环境变量 `PORT`/`HOST` 覆盖），浏览器访问 `http://localhost:13000`。无需 `npm install`。本地配置统一放 `.env`（零依赖加载器，已被 .gitignore 排除），模板见 `.env.example`。
 - **无测试、无 Lint、无构建步骤**：前端是纯静态 `index.html`，后端是无依赖的 Node 原生 `http` 模块，没有测试框架或构建链。
-- **改代码后需重启服务才生效**：结束旧 node 进程（`Get-CimInstance Win32_Process -Filter "Name='node.exe'"` 找到 server.js 的 PID，`Stop-Process`）再 `node server.js`。
+- **改代码后需重启服务才生效**：结束旧 node 进程（`Get-CimInstance Win32_Process -Filter "Name='node.exe'"` 找到 server.js/start.js 的 PID，`Stop-Process`）再 `npm start`。
 - **手动运行 AHK 脚本调试**：可 `AutoHotkey.exe control-shot.ahk` 单独跑，脚本会把结果写入 `screenshots/` 下的 JSON，方便检查。
 
 ## 架构
@@ -33,6 +33,8 @@
 - `POST /api/control/click` → 接收 `{x, y}`（截图像素坐标），运行 `control-click.ahk <x> <y>` 执行点击。
 - `POST /api/control/input` → 接收 `{x, y, text, clear}`（截图像素坐标 + 文本 + 是否清空），先把 `text` 写入 `screenshots/input-text.txt`（UTF-8 无 BOM，避免命令行转义），再运行 `control-input.ahk <x> <y> <clear>` 输入文本。
 - `GET /api/control/screenshot` → 返回最新 `control.png`。
+- `GET /api/garden/update` → 返回当前版本信息、更新历史、下载地址配置。
+- `POST /api/garden/update` → 更新花妖程序。body 传 `{version:"1.5.1"}` 或 `{auto:true}`（自动推算下一版本，末位 +1）。流程：结束运行中的花妖进程 → 下载 zip → 解压到安装目录 `v<版本>/` → 定位主程序 → **预先用 `netsh advfirewall` 添加防火墙放行规则（避免首次启动弹 Windows"允许联网"对话框，需管理员权限）** → 启动主程序 → 写 `version.json` 与 `update.log`。
 
 **坐标映射机制**：`control-shot.ahk` 把窗口矩形 `(x, y, w, h)` 写入 `control-meta.json`；前端拿到矩形后在截图内计算点击的"截图像素坐标"并传给后端；`control-click.ahk` 重新读取窗口当前位置，把截图像素坐标加上窗口偏移映射为屏幕坐标再点击，随后自动重新截图形成"所见即所得"反馈闭环。因此**窗口移动不影响坐标映射正确性**。
 
@@ -57,6 +59,13 @@
 - `control-input.ahk`：接收 `<sx> <sy> <clear>`，先点击目标坐标确保输入框焦点，再从 `input-text.txt` 读文本写入剪贴板后 `Ctrl+V` 粘贴（clear=1 先 `Ctrl+A` 全选覆盖，clear=0 先 `^{End}` 定位到末尾追加），最后截图反馈。
 - `image-put.ahk`：第三方库（上游名为 `ImagePut.ahk`），用于精确截图和 GDI+ 操作，勿修改。同步上游更新时注意替换回原名。
 - `status.json` / `screenshots/`：运行时生成的状态与截图文件（前端已不读 `status.json`）。
+- `hua-yao/`：花妖程序安装目录（下载解压产物，已 .gitignore）。内含 `version.json`（版本信息）与 `update.log`（更新日志）。
+
+### 版本更新可配置项（`.env`）
+
+- `GARDEN_DOWNLOAD_URL`：完整下载地址，`{v}` 占位替换为目标版本号。**无默认值**——真实 CDN 地址属敏感信息，代码与模板均不内置，必须由用户在本地 `.env` 自行配置；未配置时更新功能不可用（前端面板会提示、`POST` 接口返回错误）。
+- `GARDEN_INSTALL_DIR`：安装目录，默认项目下 `hua-yao/`。
+- `GARDEN_EXE_NAME`：解压后要启动的主程序名（`{v}` 占位替换为目标版本号），默认 `garden-v{v}-x64.exe`（找不到时回退到目录内任意 `.exe`）。运行进程结束按 `GARDEN_EXE_NAME` 的 `{v}` 前缀匹配（如 `garden-v` 覆盖 `garden-v1.4.9-x64`）。
 
 ### 环境要求
 

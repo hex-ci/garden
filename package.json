@@ -4,7 +4,7 @@
   "description": "这是“花妖”辅助工具的远程操控台：用浏览器实时看到电脑上花妖的画面，轻点一下屏幕，就能真的在电脑上点一下对应的位置。走到哪儿，花园就在手边。",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node start.js"
   },
   "private": true
 }

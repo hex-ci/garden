@@ -13,6 +13,10 @@ screenshots/
 control-meta.json
 input-text.txt
 
+# ===== 花妖程序(下载解压的安装包, 不随仓库分发) =====
+hua-yao/
+.garden-dl-*.tmp
+
 # ===== 日志 =====
 logs/
 *.log

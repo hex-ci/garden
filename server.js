@@ -1,6 +1,7 @@
 'use strict';
 
 const http = require('http');
+const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process');
@@ -28,6 +29,20 @@ const HOST = process.env.HOST || '0.0.0.0';
 const PORT = Number(process.env.PORT) || 13000;
 const SCREENSHOTS_DIR = path.join(ROOT, 'screenshots');
 const INDEX_FILE = path.join(ROOT, 'index.html');
+
+// ---- 花妖程序更新(可配置, 地址可能随 CDN 变动而改) ----
+// GARDEN_DOWNLOAD_URL: 完整下载地址, 其中 {v} 会被替换为目标版本号。
+//   真实 CDN 地址属敏感信息, 不内置默认值, 必须由用户在 .env 中自行配置;
+//   未配置时更新功能不可用(后端返回提示, 前端面板也会提示)。
+// GARDEN_INSTALL_DIR:  解压/安装目录(相对 ROOT 或绝对路径), 默认 ROOT 下 hua-yao/
+// GARDEN_EXE_NAME:     解压后需要启动的主程序文件名, 其中 {v} 会被替换为目标版本号
+const GARDEN_DOWNLOAD_URL = (process.env.GARDEN_DOWNLOAD_URL || '').trim();
+const GARDEN_INSTALL_DIR = path.resolve(ROOT, process.env.GARDEN_INSTALL_DIR || 'hua-yao');
+const GARDEN_EXE_NAME = process.env.GARDEN_EXE_NAME || 'garden-v{v}-x64.exe';
+const GARDEN_VERSIONS_FILE = path.join(GARDEN_INSTALL_DIR, 'version.json');
+const GARDEN_LOG_FILE = path.join(GARDEN_INSTALL_DIR, 'update.log');
+// 从 exe 名模板推导进程名前缀(用于匹配带版本号的运行进程): "garden-v{v}-x64.exe" -> "garden-v"
+const GARDEN_PROC_PREFIX = GARDEN_EXE_NAME.split('{v}')[0].toLowerCase();
 
 // ---- 定位 AutoHotkey 可执行文件 ----
 const AHK = (function findAhk() {
@@ -128,6 +143,247 @@ async function controlAction(res, script, args) {
   res.end(JSON.stringify(body));
 }
 
+// ===== 花妖程序更新 =====
+// 版本号形如 "1.5.0"; 文件名模板中的 {v} 被替换为目标版本号
+const VERSION_RE = /^\d+\.\d+\.\d+$/;
+// 精确进程名兜底(不含版本号的老式命名), 带版本号的主进程走 GARDEN_PROC_PREFIX 前缀匹配
+const GARDEN_PROC_NAMES = ['garden.exe', 'garden', 'hua-yao.exe', 'huayao.exe'];
+
+// 读/写更新日志与版本信息(均落在安装目录, 已 .gitignore)
+function updateLog(line) {
+  try {
+    fs.appendFileSync(GARDEN_LOG_FILE, `[${new Date().toISOString()}] ${line}\n`, 'utf8');
+  } catch { /* ignore */ }
+  console.log('[更新] ' + line);
+}
+function readVersionInfo() {
+  try {
+    return JSON.parse(fs.readFileSync(GARDEN_VERSIONS_FILE, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+function writeVersionInfo(info) {
+  try {
+    fs.mkdirSync(GARDEN_INSTALL_DIR, { recursive: true });
+    fs.writeFileSync(GARDEN_VERSIONS_FILE, JSON.stringify(info, null, 2), 'utf8');
+  } catch { /* ignore */ }
+}
+// 从版本号推算下一个版本(末位 +1): "1.5.0" -> "1.5.1"
+function nextVersion(v) {
+  const m = String(v || '').match(/^(\d+)\.(\d+)\.(\d+)$/);
+  if (!m) return null;
+  return `${m[1]}.${m[2]}.${Number(m[3]) + 1}`;
+}
+
+// 找出正在运行的花妖进程并结束
+function killGardenProcesses() {
+  const found = [];
+  try {
+    const r = spawnSync('tasklist', ['/FO', 'CSV', '/NH'], { windowsHide: true, encoding: 'utf8' });
+    const out = r.stdout || '';
+    for (const line of out.split(/\r?\n/)) {
+      const m = line.match(/"([^"]+)\.exe"/i);
+      if (!m) continue;
+      const name = m[1].toLowerCase();
+      // 精确名兜底 + 前缀匹配(覆盖 garden-v1.4.9-x64 这类带版本号的进程名)
+      const isMatch = GARDEN_PROC_NAMES.includes(name) ||
+        (GARDEN_PROC_PREFIX && name.startsWith(GARDEN_PROC_PREFIX));
+      if (isMatch) {
+        found.push(name);
+        try { spawnSync('taskkill', ['/F', '/IM', `${name}.exe`], { windowsHide: true }); } catch { /* ignore */ }
+      }
+    }
+  } catch { /* ignore */ }
+  return found;
+}
+
+// 下载 URL 到本地临时文件(跟随重定向), 返回临时文件路径
+function downloadToTemp(url) {
+  return new Promise((resolve, reject) => {
+    const tmp = path.join(ROOT, `.garden-dl-${Date.now()}-${Math.random().toString(36).slice(2)}.tmp`);
+    const file = fs.createWriteStream(tmp);
+    const req = https.get(url, { headers: { 'User-Agent': 'garden-control/1.0' } }, (res) => {
+      // 重定向跟随(最多 5 次)
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        file.close();
+        fs.unlinkSync(tmp);
+        const next = new URL(res.headers.location, url).toString();
+        resolve(downloadToTemp(next));
+        return;
+      }
+      if (res.statusCode !== 200) {
+        file.close();
+        fs.unlinkSync(tmp);
+        reject(new Error(`下载失败(HTTP ${res.statusCode})`));
+        return;
+      }
+      res.pipe(file);
+      file.on('finish', () => file.close(() => resolve(tmp)));
+      file.on('error', (e) => { try { fs.unlinkSync(tmp); } catch {} reject(e); });
+    });
+    req.on('error', (e) => { try { fs.unlinkSync(tmp); } catch {} reject(e); });
+    req.setTimeout(120000, () => { req.destroy(new Error('下载超时')); });
+  });
+}
+
+// 解压 zip(优先系统 tar, 回退 PowerShell)
+function extractZip(zipFile, destDir) {
+  try {
+    fs.mkdirSync(destDir, { recursive: true });
+  } catch { /* ignore */ }
+  // Windows 10+ 自带 tar 支持解压 zip
+  const r = spawnSync('tar', ['-xf', zipFile, '-C', destDir], { windowsHide: true });
+  if (r.status === 0) return true;
+  // 回退: PowerShell Expand-Archive
+  const ps = spawnSync('powershell', ['-NoProfile', '-Command',
+    `Expand-Archive -LiteralPath '${zipFile.replace(/'/g, "''")}' -DestinationPath '${destDir.replace(/'/g, "''")}' -Force`],
+    { windowsHide: true });
+  return ps.status === 0;
+}
+
+// 在安装目录内查找启动程序(优先按配置名精确匹配, 回退任意 .exe)
+function findGardenExe(dir, ver) {
+  const prefer = GARDEN_EXE_NAME.replace(/\{v\}/g, ver).toLowerCase();
+  const walk = (d, depth) => {
+    if (depth > 4) return null;
+    let entries;
+    try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { return null; }
+    for (const e of entries) {
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) {
+        const hit = walk(p, depth + 1);
+        if (hit) return hit;
+      } else if (e.name.toLowerCase().endsWith('.exe')) {
+        if (e.name.toLowerCase() === prefer) return p;
+      }
+    }
+    // 第二遍: 任意 .exe 兜底
+    for (const e of entries) {
+      if (e.isDirectory()) continue;
+      if (e.name.toLowerCase().endsWith('.exe')) return path.join(d, e.name);
+    }
+    return null;
+  };
+  return walk(dir, 0);
+}
+
+// 预先添加 Windows 防火墙放行规则, 避免新版 exe 首次启动弹出"允许联网"对话框
+// 需要管理员权限; 失败返回 false(由调用方提示)
+function addFirewallRule(exePath) {
+  const ruleName = 'Garden HuaYao';
+  try {
+    // 先删除同名旧规则(可能不存在, 忽略), 再分别添加入站/出站允许规则
+    spawnSync('netsh', ['advfirewall', 'firewall', 'delete', 'rule', `name=${ruleName}`], { windowsHide: true });
+    spawnSync('netsh', ['advfirewall', 'firewall', 'delete', 'rule', `name=${ruleName}-out`], { windowsHide: true });
+    const inR = spawnSync('netsh', ['advfirewall', 'firewall', 'add', 'rule',
+      `name=${ruleName}`, 'dir=in', 'action=allow', `program=${exePath}`, 'enable=yes', 'profile=any'], { windowsHide: true });
+    const outR = spawnSync('netsh', ['advfirewall', 'firewall', 'add', 'rule',
+      `name=${ruleName}-out`, 'dir=out', 'action=allow', `program=${exePath}`, 'enable=yes', 'profile=any'], { windowsHide: true });
+    return inR.status === 0 && outR.status === 0;
+  } catch {
+    return false;
+  }
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// 轮询等待新版花妖窗口出现(窗口标题"花妖" + 进程名前缀匹配), 超时返回 false
+// 用于启动新版程序后等待其就绪, 避免前端立即刷新截图时程序还没启动完
+async function waitForGardenWindow(timeoutMs = 15000) {
+  // 用 [char] 拼出"花妖", 避免命令行中文编码问题
+  const titleCode = '([string][char]0x82B1 + [char]0x5996)';
+  const script = `$t = ${titleCode}; $p = Get-Process | Where-Object { $_.ProcessName -like '${GARDEN_PROC_PREFIX}*' -and $_.MainWindowTitle -eq $t } | Select-Object -First 1; if ($p) { Write-Output 'READY' }`;
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const r = spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true, encoding: 'utf8', timeout: 10000 });
+      if ((r.stdout || '').includes('READY')) return true;
+    } catch { /* ignore */ }
+    await sleep(600);
+  }
+  return false;
+}
+
+async function performUpdate(targetVersion) {
+  const steps = [];
+  const log = (s) => { steps.push(s); updateLog(s); };
+  const info = { lastVersion: null, currentVersion: null, lastUpdated: null, versions: [] };
+  const prev = readVersionInfo();
+  if (prev) Object.assign(info, prev);
+  info.versions = Array.isArray(info.versions) ? info.versions : [];
+
+  try {
+    const ver = String(targetVersion || '').trim();
+    if (!VERSION_RE.test(ver)) {
+      return { ok: false, error: 'bad version', message: '版本号格式应为 x.y.z，例如 1.5.0' };
+    }
+    if (!GARDEN_DOWNLOAD_URL) {
+      throw new Error('未配置下载地址，请在 .env 中设置 GARDEN_DOWNLOAD_URL（{v} 占位版本号）');
+    }
+    const url = GARDEN_DOWNLOAD_URL.replace(/\{v\}/g, ver);
+    log(`开始更新到版本 ${ver}，下载地址: ${url}`);
+
+    // 1) 结束正在运行的花妖
+    const killed = killGardenProcesses();
+    log(killed.length ? `已结束运行中的花妖进程: ${killed.join(', ')}` : '未发现运行中的花妖进程');
+
+    // 2) 下载
+    log('正在下载压缩包…');
+    const zip = await downloadToTemp(url);
+
+    // 3) 解压
+    log('下载完成，正在解压…');
+    const verDir = path.join(GARDEN_INSTALL_DIR, `v${ver}`);
+    try { fs.rmSync(verDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    if (!extractZip(zip, verDir)) {
+      try { fs.unlinkSync(zip); } catch {}
+      throw new Error('解压失败');
+    }
+    try { fs.unlinkSync(zip); } catch { /* ignore */ }
+
+    // 4) 定位并启动新版花妖
+    const exe = findGardenExe(verDir, ver);
+    if (!exe) throw new Error(`解压后未找到可执行文件(${GARDEN_EXE_NAME.replace(/\{v\}/g, ver)})`);
+    log(`找到启动程序: ${exe}`);
+    // 预先放行防火墙, 避免首次启动弹出 Windows "允许联网" 对话框
+    const fw = addFirewallRule(exe);
+    log(fw ? '已预添加防火墙放行规则' : '未能添加防火墙规则(服务可能需要以管理员身份运行), 若弹出联网提示请手动允许');
+    const child = spawn(exe, [], { cwd: path.dirname(exe), detached: true, stdio: 'ignore', windowsHide: false });
+    child.unref();
+    log(`已启动新版花妖 (PID ${child.pid})`);
+
+    // 等待新版花妖窗口就绪后再返回, 避免前端立即刷新截图时程序还没启动完
+    const winReady = await waitForGardenWindow();
+    if (winReady) {
+      await sleep(1000); // 窗口出现后再等 1 秒, 让界面稳定
+      log('新版花妖窗口已就绪');
+    } else {
+      log('等待新版花妖窗口超时(可稍后手动刷新画面)');
+    }
+
+    // 5) 记录版本信息
+    const now = new Date().toISOString();
+    if (info.currentVersion !== ver) {
+      info.lastVersion = info.currentVersion; // 仅版本变化时才更新"上一版本"
+    }
+    info.currentVersion = ver;
+    info.lastUpdated = now;
+    // versions 按版本去重: 同版本重复更新只覆盖最近一次时间, 不堆叠相同记录
+    const entry = { version: ver, updatedAt: now, exe };
+    const idx = info.versions.findIndex(h => h.version === ver);
+    if (idx >= 0) info.versions[idx] = entry;
+    else info.versions.push(entry);
+    writeVersionInfo(info);
+
+    log(`更新完成: 当前版本 ${ver}`);
+    return { ok: true, message: `已更新到 ${ver} 并启动`, version: ver, steps, info };
+  } catch (e) {
+    log(`更新失败: ${e.message}`);
+    return { ok: false, error: 'update failed', message: e.message, steps };
+  }
+}
+
 function serveFile(res, fp, contentType) {
   fs.readFile(fp, (err, data) => {
     if (err) {
@@ -197,6 +453,41 @@ const server = http.createServer(async (req, res) => {
       return res.end(JSON.stringify({ ok: false, message: '写入文本文件失败: ' + e.message }));
     }
     return controlAction(res, 'control-input.ahk', [String(x), String(y), clear ? '1' : '0']);
+  }
+
+  // ---- 花妖程序更新 ----
+  // 查看当前版本信息与下载地址配置
+  if (req.method === 'GET' && url === '/api/garden/update') {
+    const info = readVersionInfo() || {};
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+    return res.end(JSON.stringify({
+      ok: true,
+      currentVersion: info.currentVersion || null,
+      lastVersion: info.lastVersion || null,
+      lastUpdated: info.lastUpdated || null,
+      versions: Array.isArray(info.versions) ? info.versions : [],
+      downloadUrl: GARDEN_DOWNLOAD_URL || null,
+      configured: !!GARDEN_DOWNLOAD_URL,
+      installDir: GARDEN_INSTALL_DIR,
+    }));
+  }
+
+  // 执行更新; body: { version } 或 { auto: true }(自动探测下一版本)
+  if (req.method === 'POST' && url === '/api/garden/update') {
+    const body = await readJsonBody(req);
+    let target = body.version;
+    if (body.auto === true || body.auto === '1' || body.auto === 1) {
+      const info = readVersionInfo() || {};
+      const base = info.currentVersion || info.lastVersion || '0.0.0';
+      target = nextVersion(base);
+      if (!target) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ ok: false, error: 'bad version', message: '无法从当前版本推算下一版本，请手动指定版本号' }));
+      }
+    }
+    const result = await performUpdate(target);
+    res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+    return res.end(JSON.stringify(result));
   }
 
   res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });

@@ -212,12 +212,36 @@
     display: flex; align-items: center; justify-content: center; gap: 6px;
   }
   #inputSend:active, #inputCancel:active { filter: brightness(1.15); transform: translateY(1px); }
+
+  /* ===== 版本更新面板 ===== */
+  .update-card { padding-bottom: max(env(safe-area-inset-bottom), 20px); }
+  .update-info { font-size: 13px; color: #cbd5e1; line-height: 1.6; margin-bottom: 14px; }
+  .update-info b { color: var(--amber); font-weight: 600; }
+  .update-info .dim { color: var(--muted); }
+  .update-field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+  .update-field label { font-size: 12px; color: var(--muted); }
+  #updateVersion {
+    width: 100%; height: 46px; padding: 0 14px; border-radius: 12px;
+    background: rgba(255,255,255,.06); border: 1px solid var(--line);
+    color: var(--txt); font-size: 16px; font-family: ui-monospace,Consolas,monospace; outline: none;
+  }
+  #updateVersion:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(56,189,248,.18); }
+  .update-actions { display: flex; gap: 10px; }
+  .update-actions button { height: 48px; border-radius: 13px; font-size: 15px; font-weight: 800; cursor: pointer; flex: 1; }
+  .update-actions button:disabled { opacity: .45; }
+  #updateAuto { background: rgba(255,255,255,.08); border: 1px solid var(--line); color: var(--txt); }
+  #updateGo { background: linear-gradient(135deg,#f59e0b,#fbbf24); border: none; color: #1e293b; box-shadow: 0 4px 18px rgba(245,158,11,.3); }
+  #updateGo:active, #updateAuto:active { filter: brightness(1.1); transform: translateY(1px); }
+  .update-steps { margin-top: 14px; font-size: 12px; color: var(--muted); line-height: 1.7; white-space: pre-wrap; max-height: 40vh; overflow-y: auto; font-family: ui-monospace,Consolas,monospace; }
+  .update-steps .ok { color: var(--green); }
+  .update-steps .err { color: var(--red); }
 </style>
 </head>
 <body>
 <div class="app">
   <div class="topbar">
     <div class="brand"><span id="dot" class="dot"></span><div class="bt">花妖 · 操控台<small id="sub">直接点击模式</small></div></div>
+    <button class="help-btn" id="updateBtn" title="更新花妖版本">↑</button>
     <button class="help-btn" id="helpBtn" title="操作说明">?</button>
   </div>
 
@@ -281,6 +305,22 @@
   </div>
 </div>
 
+<div class="modal" id="updateModal" role="dialog" aria-modal="true" aria-label="更新花妖版本">
+  <div class="modal-card update-card" id="updateCard">
+    <h3>更新花妖版本 <button id="updateClose" aria-label="关闭">×</button></h3>
+    <div class="update-info" id="updateInfo">加载中…</div>
+    <div class="update-field">
+      <label for="updateVersion">目标版本号</label>
+      <input id="updateVersion" type="text" inputmode="decimal" placeholder="例如 1.5.1" aria-label="目标版本号" />
+    </div>
+    <div class="update-actions">
+      <button id="updateAuto">自动下一版本</button>
+      <button id="updateGo">更新到此版本</button>
+    </div>
+    <div class="update-steps" id="updateSteps"></div>
+  </div>
+</div>
+
 <script>
   const $ = id => document.getElementById(id);
   const dot=$('dot'), sub=$('sub'), stage=$('stage'), viewport=$('viewport'), img=$('ctrlImg'),
@@ -292,7 +332,10 @@
     helpModal=$('helpModal'), helpBtn=$('helpBtn'), helpClose=$('helpClose'),
     inputBtn=$('inputBtn'), inputModal=$('inputModal'), inputCard=$('inputCard'),
     inputClose=$('inputClose'), inputCancel=$('inputCancel'), inputSend=$('inputSend'),
-    inputArea=$('inputArea'), clearSwitch=$('clearSwitch');
+    inputArea=$('inputArea'), clearSwitch=$('clearSwitch'),
+    updateBtn=$('updateBtn'), updateModal=$('updateModal'), updateCard=$('updateCard'),
+    updateClose=$('updateClose'), updateInfo=$('updateInfo'), updateVersion=$('updateVersion'),
+    updateAuto=$('updateAuto'), updateGo=$('updateGo'), updateSteps=$('updateSteps');
 
   // ===== 状态 =====
   let rect=null, imgNatural=null, busy=false, tok=0, zoom=1;
@@ -585,6 +628,73 @@
   helpBtn.addEventListener('click',openHelp);
   helpClose.addEventListener('click',closeHelp);
   helpModal.addEventListener('click',(e)=>{ if(e.target===helpModal) closeHelp(); });
+
+  // ===== 花妖版本更新 =====
+  const VERSION_RE = /^\d+\.\d+\.\d+$/;
+  let updating = false;
+  function openUpdate(){
+    updateModal.classList.add('show');
+    updateSteps.textContent = '';
+    updateInfo.innerHTML = '加载中…';
+    updateAuto.disabled = true; updateGo.disabled = true;
+    fetch('/api/garden/update', { cache: 'no-store' })
+      .then(r => r.json().catch(() => ({})))
+      .then(d => {
+        if (d.ok === false) { updateInfo.textContent = d.message || '获取版本信息失败'; return; }
+        const cur = d.currentVersion || '未安装';
+        const src = d.configured ? (d.downloadUrl || '未知') : '未配置（请在 .env 中设置 GARDEN_DOWNLOAD_URL 后重启服务）';
+        updateInfo.innerHTML = '当前版本：<b>' + cur + '</b>' +
+          (d.lastUpdated ? ' · 更新于 <span class="dim">' + d.lastUpdated.replace('T',' ').slice(0,19) + '</span>' : '') +
+          '<br><span class="dim">下载源：' + src + '</span>';
+        if (d.currentVersion) updateVersion.value = nextVersionStr(d.currentVersion);
+        if (!d.configured) { updateAuto.disabled = true; updateGo.disabled = true; }
+        else { updateAuto.disabled = false; updateGo.disabled = false; }
+      })
+      .catch(() => { updateInfo.textContent = '获取版本信息失败'; });
+  }
+  function nextVersionStr(v){
+    const m = String(v || '').match(/^(\d+)\.(\d+)\.(\d+)$/);
+    return m ? (m[1] + '.' + m[2] + '.' + (Number(m[3]) + 1)) : (v || '');
+  }
+  function closeUpdate(){ updateModal.classList.remove('show'); }
+  function setUpdating(b){
+    updating = b;
+    updateGo.disabled = b; updateAuto.disabled = b;
+    updateVersion.disabled = b;
+  }
+  function doUpdate(body){
+    if (updating) return;
+    setUpdating(true);
+    updateSteps.textContent = '处理中…';
+    updateSteps.className = 'update-steps';
+    fetch('/api/garden/update', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), cache: 'no-store' })
+      .then(r => r.json().catch(() => ({})))
+      .then(d => {
+        if (d.ok) {
+          updateSteps.textContent = (d.steps || []).join('\n') + '\n' + (d.message || '完成');
+          updateSteps.className = 'update-steps ok';
+          toast(d.message || '更新完成');
+          // 更新成功后重新截图, 展示新版花妖画面
+          closeUpdate();
+          doShot();
+        } else {
+          updateSteps.textContent = (d.steps || []).join('\n') + '\n' + (d.message || '更新失败');
+          updateSteps.className = 'update-steps err';
+          toast(d.message || '更新失败');
+        }
+      })
+      .catch(() => { updateSteps.textContent = '请求失败'; updateSteps.className = 'update-steps err'; toast('请求失败'); })
+      .finally(() => setUpdating(false));
+  }
+  updateBtn.addEventListener('click', openUpdate);
+  updateClose.addEventListener('click', closeUpdate);
+  updateModal.addEventListener('click', (e) => { if (e.target === updateModal) closeUpdate(); });
+  updateAuto.addEventListener('click', () => doUpdate({ auto: true }));
+  updateGo.addEventListener('click', () => {
+    const v = updateVersion.value.trim();
+    if (!VERSION_RE.test(v)) { toast('版本号格式应为 x.y.z，例如 1.5.1'); updateVersion.focus(); return; }
+    doUpdate({ version: v });
+  });
 
   // ===== 初始化 =====
   applyMode();
