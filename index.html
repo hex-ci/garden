@@ -673,7 +673,7 @@
         const cur = d.currentVersion || '未安装';
         const src = d.configured ? (d.downloadUrl || '未知') : '未配置（请在 .env 中设置 GARDEN_DOWNLOAD_URL 后重启服务）';
         updateInfo.innerHTML = '当前版本：<b>' + cur + '</b>' +
-          (d.lastUpdated ? ' · 更新于 <span class="dim">' + d.lastUpdated.replace('T',' ').slice(0,19) + '</span>' : '') +
+          (d.lastUpdated ? ' · 更新于 <span class="dim">' + d.lastUpdated + '</span>' : '') +
           '<br><span class="dim">下载源：' + src + '</span>';
         if (d.currentVersion) updateVersion.value = nextVersionStr(d.currentVersion);
         if (!d.configured) { updateAuto.disabled = true; updateGo.disabled = true; }

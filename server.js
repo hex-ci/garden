@@ -151,10 +151,18 @@ const VERSION_RE = /^\d+\.\d+\.\d+$/;
 // 精确进程名兜底(不含版本号的老式命名), 带版本号的主进程走 GARDEN_PROC_PREFIX 前缀匹配
 const GARDEN_PROC_NAMES = ['garden.exe', 'garden', 'hua-yao.exe', 'huayao.exe'];
 
+// 系统本地时间戳(跟随系统时区, 中国环境即东八区), 格式 YYYY-MM-DD HH:MM:SS
+// 用于更新日志与版本信息, 避免 toISOString() 输出 UTC 导致显示时间不对
+function localTimestamp(d) {
+  const dt = d || new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return `${dt.getFullYear()}-${p(dt.getMonth() + 1)}-${p(dt.getDate())} ${p(dt.getHours())}:${p(dt.getMinutes())}:${p(dt.getSeconds())}`;
+}
+
 // 读/写更新日志与版本信息(均落在安装目录, 已 .gitignore)
 function updateLog(line) {
   try {
-    fs.appendFileSync(GARDEN_LOG_FILE, `[${new Date().toISOString()}] ${line}\n`, 'utf8');
+    fs.appendFileSync(GARDEN_LOG_FILE, `[${localTimestamp()}] ${line}\n`, 'utf8');
   } catch { /* ignore */ }
   console.log('[更新] ' + line);
 }
@@ -176,6 +184,19 @@ function nextVersion(v) {
   const m = String(v || '').match(/^(\d+)\.(\d+)\.(\d+)$/);
   if (!m) return null;
   return `${m[1]}.${m[2]}.${Number(m[3]) + 1}`;
+}
+// 解析版本号为 {major, minor, patch}, 非法返回 null
+function parseVersion(v) {
+  const m = /^(\d+)\.(\d+)\.(\d+)$/.exec(String(v || ''));
+  return m ? { major: Number(m[1]), minor: Number(m[2]), patch: Number(m[3]) } : null;
+}
+// 比较两个解析后的版本: a<b => -1, a>b => 1, 相等 => 0
+function versionCompare(a, b) {
+  if (!a || !b) return 0;
+  for (const k of ['major', 'minor', 'patch']) {
+    if (a[k] !== b[k]) return a[k] < b[k] ? -1 : 1;
+  }
+  return 0;
 }
 
 // 找出正在运行的花妖进程并结束
@@ -416,6 +437,11 @@ async function performUpdate(targetVersion) {
     if (!VERSION_RE.test(ver)) {
       return { ok: false, error: 'bad version', message: '版本号格式应为 x.y.z，例如 1.5.0' };
     }
+    // 禁止降级: 花妖是游戏辅助工具, 旧版本可能已被游戏限制, 没有回退意义, 一律不允许降级
+    if (info.currentVersion && versionCompare(parseVersion(ver), parseVersion(info.currentVersion)) < 0) {
+      return { ok: false, error: 'downgrade blocked',
+        message: `不允许降级: 当前版本 ${info.currentVersion}，目标 ${ver} 是更低版本` };
+    }
     if (!GARDEN_DOWNLOAD_URL) {
       throw new Error('未配置下载地址，请在 .env 中设置 GARDEN_DOWNLOAD_URL（{v} 占位版本号）');
     }
@@ -485,7 +511,7 @@ async function performUpdate(targetVersion) {
     }
 
     // 9) 记录版本信息
-    const now = new Date().toISOString();
+    const now = localTimestamp(); // 本地时区(东八区)时间, 与日志一致
     if (info.currentVersion !== ver) {
       info.lastVersion = info.currentVersion; // 仅版本变化时才更新"上一版本"
     }
