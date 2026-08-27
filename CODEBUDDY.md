@@ -4,14 +4,14 @@
 
 这是"花妖"(HuaYao)游戏**远程操控台**：通过浏览器实时查看"花妖"桌面程序的画面，单击画面即可在花妖窗口对应位置执行鼠标点击。打开页面即为全屏操控界面。
 
-技术栈为 **Node.js 后端 + HTML5 前端 + AutoHotkey v2 脚本**，无任何第三方 npm 依赖。后端用 `child_process` spawn 一次性的 AHK 脚本执行"截图/点击"，前端只负责展示画面和收集点击坐标。
+技术栈为 **Node.js 后端 + HTML5 前端 + AutoHotkey v2 脚本**，仅依赖 `yauzl`（纯 Node ZIP 解压，用于花妖更新，替代系统 tar/powershell）。后端用 `child_process` spawn 一次性的 AHK 脚本执行"截图/点击"，前端只负责展示画面和收集点击坐标。
 
 > 演进说明：早期有基于像素颜色识别的"启动/停止/重新登录"按钮，但因花妖 UI 有持续动画、按钮颜色不稳定，自动识别经常误判。这些功能已**全部删除**，改为让用户通过操控画面直接点击操作，更直观可靠。当前**只保留远程操控这一个核心功能**。
 
 ## 常用命令
 
-- **启动服务**：`npm start`（等价于 `node start.js`）。`start.js` 会检测是否管理员，非管理员在 Windows 下弹 UAC 提权后以管理员重新启动（因为更新花妖写防火墙规则需要管理员权限），之后加载 `server.js`。监听 `0.0.0.0:13000`（可用 `.env` 或环境变量 `PORT`/`HOST` 覆盖），浏览器访问 `http://localhost:13000`。无需 `npm install`。本地配置统一放 `.env`（零依赖加载器，已被 .gitignore 排除），模板见 `.env.example`。
-- **无测试、无 Lint、无构建步骤**：前端是纯静态 `index.html`，后端是无依赖的 Node 原生 `http` 模块，没有测试框架或构建链。
+- **启动服务**：`npm start`（等价于 `node start.js`）。`start.js` 会检测是否管理员，非管理员在 Windows 下弹 UAC 提权后以管理员重新启动（因为更新花妖写防火墙规则需要管理员权限），之后加载 `server.js`。监听 `0.0.0.0:13000`（可用 `.env` 或环境变量 `PORT`/`HOST` 覆盖），浏览器访问 `http://localhost:13000`。首次部署需 `npm install` 安装 `yauzl`（其余逻辑零依赖）。本地配置统一放 `.env`（零依赖加载器，已被 .gitignore 排除），模板见 `.env.example`。
+- **无测试、无 Lint、无构建步骤**：前端是纯静态 `index.html`，后端用 Node 原生 `http` 模块，唯一第三方依赖 `yauzl`（解压 zip）。
 - **改代码后需重启服务才生效**：结束旧 node 进程（`Get-CimInstance Win32_Process -Filter "Name='node.exe'"` 找到 server.js/start.js 的 PID，`Stop-Process`）再 `npm start`。
 - **手动运行 AHK 脚本调试**：可 `AutoHotkey.exe control-shot.ahk` 单独跑，脚本会把结果写入 `screenshots/` 下的 JSON，方便检查。
 
@@ -29,12 +29,13 @@
 
 ### API（全部为远程操控相关）
 
-- `POST /api/control/shot` → 运行 `control-shot.ahk`，把花妖窗口置于前台并截图。
+- `POST /api/control/shot` → 运行 `control-shot.ahk`，把花妖窗口置于前台并截图。截图前会先 `ensureGardenRunning()`：按**当前版本 exe 完整路径精确匹配**检测运行情况——当前版本没在运行（被杀/退出）或跑的是其他旧版本时，结束旧进程并重新启动 `version.json` 记录的当前版本 exe，保证操控的始终是最新版（进程路径匹配 + 服务端锁防重复启动）；等待窗口就绪后截图，响应带 `autoStarted`/`ensureError` 字段供前端提示。
+- `POST /api/control/restart` → 重启花妖：`killGardenProcesses()` 结束进程 → 等 600ms → `ensureGardenRunning()` 启动当前版本并等待窗口就绪。前端顶栏「⏻」按钮调用，成功后自动刷新画面。
 - `POST /api/control/click` → 接收 `{x, y}`（截图像素坐标），运行 `control-click.ahk <x> <y>` 执行点击。
 - `POST /api/control/input` → 接收 `{x, y, text, clear}`（截图像素坐标 + 文本 + 是否清空），先把 `text` 写入 `screenshots/input-text.txt`（UTF-8 无 BOM，避免命令行转义），再运行 `control-input.ahk <x> <y> <clear>` 输入文本。
 - `GET /api/control/screenshot` → 返回最新 `control.png`。
 - `GET /api/garden/update` → 返回当前版本信息、更新历史、下载地址配置。
-- `POST /api/garden/update` → 更新花妖程序。body 传 `{version:"1.5.1"}` 或 `{auto:true}`（自动推算下一版本，末位 +1）。流程：结束运行中的花妖进程 → 下载 zip → 解压到安装目录 `v<版本>/` → 定位主程序 → **预先用 `netsh advfirewall` 添加防火墙放行规则（避免首次启动弹 Windows"允许联网"对话框，需管理员权限）** → 启动主程序 → 写 `version.json` 与 `update.log`。
+- `POST /api/garden/update` → 更新花妖程序。body 传 `{version:"1.5.1"}` 或 `{auto:true}`（自动推算下一版本，末位 +1）。流程：下载 zip → 校验 zip 文件头 → **用 yauzl 解压**（纯 Node 实现，不依赖系统 tar/powershell）到安装目录 `v<版本>/` → 定位主程序 → 结束后正在运行的花妖 → **预先用 `netsh advfirewall` 添加防火墙放行规则（避免首次启动弹 Windows"允许联网"对话框，需管理员权限）** → 启动主程序 → 等待窗口就绪 → 写 `version.json` 与 `update.log`。任一准备步骤失败时旧版花妖不受影响；启动阶段失败会尝试恢复旧版。
 
 **坐标映射机制**：`control-shot.ahk` 把窗口矩形 `(x, y, w, h)` 写入 `control-meta.json`；前端拿到矩形后在截图内计算点击的"截图像素坐标"并传给后端；`control-click.ahk` 重新读取窗口当前位置，把截图像素坐标加上窗口偏移映射为屏幕坐标再点击，随后自动重新截图形成"所见即所得"反馈闭环。因此**窗口移动不影响坐标映射正确性**。
 
@@ -51,7 +52,7 @@
 
 ### 文件职责
 
-- `server.js`：HTTP 服务器 + 零依赖 `.env` 加载器 + AHK 定位（优先 `AHK_EXE` 环境变量，回退常见安装路径）+ 子进程管理 + 3 个操控 API。可配置项：`PORT`/`HOST`/`AHK_EXE`。花妖窗口标题(`"花妖"`)与标准尺寸(406x883)为固定常量，硬编码于脚本中，不做外部化。
+- `server.js`：HTTP 服务器 + 零依赖 `.env` 加载器 + AHK 定位（优先 `AHK_EXE` 环境变量，回退常见安装路径）+ 子进程管理 + 3 个操控 API + 花妖更新（下载/校验/yauzl 解压/防火墙/拉起）。可配置项：`PORT`/`HOST`/`AHK_EXE`/`GARDEN_DOWNLOAD_URL` 等。花妖窗口标题(`"花妖"`)与标准尺寸(406x883)为固定常量，硬编码于脚本中，不做外部化。
 - `index.html`：全屏操控界面（内联 CSS/JS），缩放/平移/准星/方向键微调等交互都在此实现。
 - `garden-lib.ahk`：公共库 —— `LogMsg`/`ResetLog`/`ShowBigLabel`/`CaptureRectToFile`/`SaveControlScreenshot`/`WriteControlMeta`/`EnsureHuaYaoWindow` 等工具函数。`EnsureHuaYaoWindow` 统一处理花妖窗口可见性：开启 `DetectHiddenWindows` 匹配托盘隐藏窗口、`WinShow`/`WinRestore` 恢复显示，矩形无效(0x0，Tauri 隐藏恢复后位置丢失)时自动 `WinMove` 重定位到屏幕居中(406x883)，全程 try/catch 失败返回友好提示而非报错中断。三个控制脚本(shot/click/input)均调用它。还残留 `ScanColorBlocks`/`CaptureRectToFile` 等旧状态识别的死代码（无调用方，可安全删除，不影响功能）。
 - `control-shot.ahk`：把花妖窗口置于前台并截图，写 `control.png` + `control-meta.json`。

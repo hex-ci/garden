@@ -174,7 +174,7 @@
     width: 34px; height: 34px; border-radius: 50%; border: 1px solid var(--line);
     background: rgba(255,255,255,.08); color: var(--txt); font-size: 16px; cursor: pointer;
   }
-  .help-row { display: flex; gap: 10px; align-items: baseline; padding: 7px 0; font-size: 14px; color: #cbd5e1; }
+  .help-row { display: flex; gap: 10px; align-items: center; padding: 7px 0; font-size: 14px; color: #cbd5e1; }
   .help-row .k {
     flex: none; min-width: 84px; text-align: center; font-weight: 700;
     background: #ffffff10; border: 1px solid var(--line); border-radius: 7px;
@@ -235,12 +235,23 @@
   .update-steps { margin-top: 14px; font-size: 12px; color: var(--muted); line-height: 1.7; white-space: pre-wrap; max-height: 40vh; overflow-y: auto; font-family: ui-monospace,Consolas,monospace; }
   .update-steps .ok { color: var(--green); }
   .update-steps .err { color: var(--red); }
+
+  /* ===== 通用确认弹窗 ===== */
+  .confirm-card { padding-bottom: max(env(safe-area-inset-bottom), 16px); }
+  .confirm-msg { font-size: 14px; color: #cbd5e1; line-height: 1.7; margin: 4px 0 16px; }
+  .confirm-actions { display: flex; gap: 10px; }
+  .confirm-actions button { height: 50px; border-radius: 14px; font-size: 16px; font-weight: 800; cursor: pointer; flex: 1; }
+  #confirmCancel { background: rgba(255,255,255,.08); border: 1px solid var(--line); color: var(--txt); }
+  #confirmOk { background: linear-gradient(135deg,#16a34a,#22c55e); border: none; color: #fff; box-shadow: 0 4px 18px rgba(34,197,94,.35); }
+  #confirmOk.danger { background: linear-gradient(135deg,#f59e0b,#fbbf24); color: #1e293b; box-shadow: 0 4px 18px rgba(245,158,11,.3); }
+  #confirmCancel:active, #confirmOk:active { filter: brightness(1.1); transform: translateY(1px); }
 </style>
 </head>
 <body>
 <div class="app">
   <div class="topbar">
     <div class="brand"><span id="dot" class="dot"></span><div class="bt">花妖 · 操控台<small id="sub">直接点击模式</small></div></div>
+    <button class="help-btn" id="restartBtn" title="重启花妖">⏻</button>
     <button class="help-btn" id="updateBtn" title="更新花妖版本">↑</button>
     <button class="help-btn" id="helpBtn" title="操作说明">?</button>
   </div>
@@ -286,6 +297,8 @@
     <div class="help-row"><span class="k">缩放/平移</span><span class="d">双指捏合缩放；放大后单指或双指拖动即可平移画面</span></div>
     <div class="help-row"><span class="k">+ − ⤾ ⟳</span><span class="d">底部工具条：放大 / 缩小 / 复位视图 / 刷新画面</span></div>
     <div class="help-row"><span class="k">⌨ 输入</span><span class="d">先点击画面选中目标输入框，再点「输入」打开面板；回车(或发送键)确认，「清空」开关可覆盖原内容</span></div>
+    <div class="help-row"><span class="k">⏻ 重启</span><span class="d">顶栏「⏻」：结束花妖进程后重新启动最新版，适用于花妖卡死/异常时</span></div>
+    <div class="help-row"><span class="k">↑ 更新</span><span class="d">顶栏「↑」：下载并更新花妖到新版本，支持输入版本号或自动下一版本</span></div>
   </div>
 </div>
 
@@ -321,6 +334,17 @@
   </div>
 </div>
 
+<div class="modal" id="confirmModal" role="dialog" aria-modal="true" aria-label="确认操作">
+  <div class="modal-card confirm-card">
+    <h3 id="confirmTitle">确认操作 <button id="confirmClose" aria-label="关闭">×</button></h3>
+    <p class="confirm-msg" id="confirmMsg"></p>
+    <div class="confirm-actions">
+      <button id="confirmCancel">取消</button>
+      <button id="confirmOk">确定</button>
+    </div>
+  </div>
+</div>
+
 <script>
   const $ = id => document.getElementById(id);
   const dot=$('dot'), sub=$('sub'), stage=$('stage'), viewport=$('viewport'), img=$('ctrlImg'),
@@ -335,7 +359,10 @@
     inputArea=$('inputArea'), clearSwitch=$('clearSwitch'),
     updateBtn=$('updateBtn'), updateModal=$('updateModal'), updateCard=$('updateCard'),
     updateClose=$('updateClose'), updateInfo=$('updateInfo'), updateVersion=$('updateVersion'),
-    updateAuto=$('updateAuto'), updateGo=$('updateGo'), updateSteps=$('updateSteps');
+    updateAuto=$('updateAuto'), updateGo=$('updateGo'), updateSteps=$('updateSteps'),
+    restartBtn=$('restartBtn'),
+    confirmModal=$('confirmModal'), confirmTitle=$('confirmTitle'), confirmMsg=$('confirmMsg'),
+    confirmOk=$('confirmOk'), confirmCancel=$('confirmCancel'), confirmClose=$('confirmClose');
 
   // ===== 状态 =====
   let rect=null, imgNatural=null, busy=false, tok=0, zoom=1;
@@ -451,6 +478,8 @@
     fetch('/api/control/shot',{method:'POST',cache:'no-store'})
       .then(r=>r.json().catch(()=>({})))
       .then(d=>{
+        if(d.autoStarted) toast('花妖未在运行，已自动重新启动');
+        else if(d.ensureError) toast(d.ensureError);
         if(!d.ok){ toast(d.message||'截图失败'); if(!rect){empty.style.display='flex';empty.textContent=d.message||'截图失败';} setReady(false); return; }
         rect=d.rect; updateMeta(); setReady(true); if(d.screenshot) showImage(d.screenshot.mtimeMs);
       })
@@ -670,15 +699,17 @@
     fetch('/api/garden/update', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), cache: 'no-store' })
       .then(r => r.json().catch(() => ({})))
       .then(d => {
+        // 后端 steps 已包含完整过程(失败时最后一条即"更新失败: xxx"), 直接展示, 避免与 d.message 重复
+        const stepsText = (d.steps || []).join('\n');
         if (d.ok) {
-          updateSteps.textContent = (d.steps || []).join('\n') + '\n' + (d.message || '完成');
+          updateSteps.textContent = stepsText || (d.message || '更新完成');
           updateSteps.className = 'update-steps ok';
           toast(d.message || '更新完成');
           // 更新成功后重新截图, 展示新版花妖画面
           closeUpdate();
           doShot();
         } else {
-          updateSteps.textContent = (d.steps || []).join('\n') + '\n' + (d.message || '更新失败');
+          updateSteps.textContent = stepsText || (d.message || '更新失败');
           updateSteps.className = 'update-steps err';
           toast(d.message || '更新失败');
         }
@@ -689,6 +720,49 @@
   updateBtn.addEventListener('click', openUpdate);
   updateClose.addEventListener('click', closeUpdate);
   updateModal.addEventListener('click', (e) => { if (e.target === updateModal) closeUpdate(); });
+  // ===== 通用确认弹窗 =====
+  function confirmDialog(opts){
+    opts = opts || {};
+    confirmTitle.textContent = opts.title || '确认操作';
+    confirmMsg.textContent = opts.message || '';
+    confirmOk.textContent = opts.okText || '确定';
+    confirmCancel.textContent = opts.cancelText || '取消';
+    confirmOk.classList.toggle('danger', !!opts.danger);
+    confirmModal._onOk = typeof opts.onOk === 'function' ? opts.onOk : null;
+    confirmModal.classList.add('show');
+  }
+  function closeConfirm(){ confirmModal.classList.remove('show'); }
+  confirmOk.addEventListener('click', () => { const cb = confirmModal._onOk; closeConfirm(); if (cb) cb(); });
+  confirmCancel.addEventListener('click', closeConfirm);
+  confirmClose.addEventListener('click', closeConfirm);
+  confirmModal.addEventListener('click', (e) => { if (e.target === confirmModal) closeConfirm(); });
+
+  // ===== 重启花妖 =====
+  let restarting = false;
+  function doRestart(){
+    if (restarting || busy) return;
+    restarting = true; setBusy(true);
+    fetch('/api/control/restart', { method: 'POST', cache: 'no-store' })
+      .then(r => r.json().catch(() => ({})))
+      .then(d => {
+        setBusy(false);
+        if (!d.ok) { toast(d.message || '重启失败'); return; }
+        toast(d.message || '花妖已重启');
+        doShot(); // 刷新画面展示重启后的花妖
+      })
+      .catch(() => { setBusy(false); toast('请求失败'); })
+      .finally(() => { restarting = false; });
+  }
+  restartBtn.addEventListener('click', () => {
+    confirmDialog({
+      title: '重启花妖',
+      message: '将结束当前花妖进程，并重新启动最新版本。确定重启吗？',
+      okText: '重启',
+      danger: true,
+      onOk: doRestart,
+    });
+  });
+
   updateAuto.addEventListener('click', () => doUpdate({ auto: true }));
   updateGo.addEventListener('click', () => {
     const v = updateVersion.value.trim();
@@ -701,7 +775,7 @@
   inputBtn.disabled = true;   // 无画面时不可输入
   doShot();
   window.addEventListener('resize', applyTransform);
-  document.addEventListener('keydown',(e)=>{ if(e.key==='Escape'){ helpModal.classList.remove('show'); closeInput(); } });
+  document.addEventListener('keydown',(e)=>{ if(e.key==='Escape'){ helpModal.classList.remove('show'); closeInput(); closeConfirm(); } });
 </script>
 </body>
 </html>

@@ -5,6 +5,7 @@ const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process');
+const yauzl = require('yauzl'); // 纯 Node ZIP 解压, 不依赖系统 tar/powershell
 
 const ROOT = __dirname;
 
@@ -128,7 +129,7 @@ function runAhk(scriptName, args = []) {
 }
 
 // 统一的操控动作处理: 运行 AHK 脚本 -> 读取最新窗口矩形与截图 -> 返回前端所需信息
-async function controlAction(res, script, args) {
+async function controlAction(res, script, args, extra) {
   const ok = await runAhk(script, args);
   const st = controlShotState();
   const meta = st.meta || {};
@@ -138,6 +139,7 @@ async function controlAction(res, script, args) {
     message: meta.message || (ok ? '操作完成' : '操作失败'),
     rect: meta.w ? { x: meta.x, y: meta.y, w: meta.w, h: meta.h } : null,
     screenshot: st.hasImage ? { mtimeMs: st.mtimeMs } : null,
+    ...(extra || {}),
   };
   res.writeHead(ok ? 200 : 500, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
   res.end(JSON.stringify(body));
@@ -198,10 +200,83 @@ function killGardenProcesses() {
   return found;
 }
 
+// 获取当前正在运行的花妖 exe 完整路径(用于更新失败时恢复旧版), 无则返回 null
+// 返回所有正在运行的 garden 进程 exe 完整路径(普通权限下可读取同用户进程的 Path)
+function getGardenProcesses() {
+  const list = [];
+  try {
+    const script = `Get-Process | Where-Object { $_.ProcessName -like '${GARDEN_PROC_PREFIX}*' } | ForEach-Object { $_.Path }`;
+    const r = spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true, encoding: 'utf8', timeout: 10000 });
+    for (const line of (r.stdout || '').split(/\r?\n/)) {
+      const p = line.trim();
+      if (p && fs.existsSync(p)) list.push(p);
+    }
+  } catch { /* ignore */ }
+  return list;
+}
+
+// 获取第一个正在运行的花妖 exe 完整路径(用于更新失败时恢复旧版), 无则返回 null
+function getRunningGardenExe() {
+  const list = getGardenProcesses();
+  return list.length ? list[0] : null;
+}
+
+// 确保花妖在运行: 进程已存在则不动; 不存在且有已安装版本则自动启动
+// 带服务端锁防止并发触发重复启动(进程检测是主防线)
+let gardenEnsureLock = false;
+// 确保花妖在运行并等待就绪: 仅当"当前版本"对应的进程在运行时才算就绪; 没运行或运行的是
+// 其他(旧)版本时, 一律结束旧进程并启动当前版本, 保证操控的始终是最新版。带锁防并发重复启动。
+async function ensureGardenRunning() {
+  if (gardenEnsureLock) return { started: false, running: true, locked: true };
+  gardenEnsureLock = true;
+  try {
+    const info = readVersionInfo();
+    if (!info || !info.currentVersion) return { started: false, running: false, error: '尚未通过操控台安装过花妖' };
+    const verEntry = (info.versions || []).find(v => v.version === info.currentVersion);
+    const exe = verEntry && verEntry.exe;
+    if (!exe || !fs.existsSync(exe)) return { started: false, running: false, error: '已安装的程序文件不存在，请重新更新花妖' };
+
+    // 按完整 exe 路径精确判断当前版本是否在运行(而非只看进程名前缀, 避免误认旧版本进程)
+    const norm = (p) => path.resolve(p).toLowerCase();
+    const running = getGardenProcesses();
+    if (running.some(p => norm(p) === norm(exe))) return { started: false, running: true, exe };
+
+    // 运行的是其他(旧)版本 -> 先结束, 确保只启动当前(最新)版本
+    if (running.length) {
+      killGardenProcesses();
+      await sleep(500);
+    }
+
+    const child = spawn(exe, [], { cwd: path.dirname(exe), detached: true, stdio: 'ignore', windowsHide: false });
+    child.unref();
+    // 等待窗口就绪(最多 30 秒), 就绪后再等 1 秒让界面稳定, 避免截到启动到一半的画面
+    const ready = await waitForGardenWindow(30000);
+    if (ready) await sleep(1000);
+    return { started: true, running: ready, ready, exe };
+  } finally {
+    gardenEnsureLock = false;
+  }
+}
+
+// 校验 zip 文件头魔数, 避免下载到错误页面/损坏文件后盲目解压
+function isValidZip(file) {
+  try {
+    const fd = fs.openSync(file, 'r');
+    const buf = Buffer.alloc(4);
+    fs.readSync(fd, buf, 0, 4, 0);
+    fs.closeSync(fd);
+    const sig = buf.readUInt32LE(0);
+    // PK\x03\x04 本地文件头 / PK\x05\x06 空包 EOCD / PK\x01\x02 中心目录
+    return sig === 0x04034B50 || sig === 0x06054B50 || sig === 0x02014B50;
+  } catch {
+    return false;
+  }
+}
+
 // 下载 URL 到本地临时文件(跟随重定向), 返回临时文件路径
 function downloadToTemp(url) {
   return new Promise((resolve, reject) => {
-    const tmp = path.join(ROOT, `.garden-dl-${Date.now()}-${Math.random().toString(36).slice(2)}.tmp`);
+    const tmp = path.join(ROOT, `.garden-dl-${Date.now()}-${Math.random().toString(36).slice(2)}.zip`);
     const file = fs.createWriteStream(tmp);
     const req = https.get(url, { headers: { 'User-Agent': 'garden-control/1.0' } }, (res) => {
       // 重定向跟随(最多 5 次)
@@ -227,19 +302,37 @@ function downloadToTemp(url) {
   });
 }
 
-// 解压 zip(优先系统 tar, 回退 PowerShell)
+// 解压 zip(纯 Node 实现, 基于 yauzl, 不依赖系统 tar/powershell)
+// 使用 lazyEntries + 逐条处理, 正确解析含 data-descriptor 的 zip, 失败/损坏返回 false
 function extractZip(zipFile, destDir) {
-  try {
-    fs.mkdirSync(destDir, { recursive: true });
-  } catch { /* ignore */ }
-  // Windows 10+ 自带 tar 支持解压 zip
-  const r = spawnSync('tar', ['-xf', zipFile, '-C', destDir], { windowsHide: true });
-  if (r.status === 0) return true;
-  // 回退: PowerShell Expand-Archive
-  const ps = spawnSync('powershell', ['-NoProfile', '-Command',
-    `Expand-Archive -LiteralPath '${zipFile.replace(/'/g, "''")}' -DestinationPath '${destDir.replace(/'/g, "''")}' -Force`],
-    { windowsHide: true });
-  return ps.status === 0;
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (ok) => { if (!done) { done = true; resolve(ok); } };
+    try { fs.mkdirSync(destDir, { recursive: true }); } catch { /* ignore */ }
+    yauzl.open(zipFile, { lazyEntries: true, autoClose: true }, (err, zipfile) => {
+      if (err || !zipfile) { finish(false); return; }
+      zipfile.on('error', () => finish(false));
+      zipfile.on('end', () => finish(true));
+      zipfile.on('entry', (entry) => {
+        const target = path.join(destDir, entry.fileName);
+        if (entry.fileName.endsWith('/')) {
+          try { fs.mkdirSync(target, { recursive: true }); } catch { /* ignore */ }
+          zipfile.readEntry();
+          return;
+        }
+        try { fs.mkdirSync(path.dirname(target), { recursive: true }); } catch { /* ignore */ }
+        zipfile.openReadStream(entry, (err2, stream) => {
+          if (err2 || !stream) { finish(false); return; }
+          const ws = fs.createWriteStream(target);
+          stream.on('error', () => finish(false));
+          ws.on('error', () => finish(false));
+          ws.on('finish', () => zipfile.readEntry());
+          stream.pipe(ws);
+        });
+      });
+      zipfile.readEntry();
+    });
+  });
 }
 
 // 在安装目录内查找启动程序(优先按配置名精确匹配, 回退任意 .exe)
@@ -312,6 +405,11 @@ async function performUpdate(targetVersion) {
   const prev = readVersionInfo();
   if (prev) Object.assign(info, prev);
   info.versions = Array.isArray(info.versions) ? info.versions : [];
+  // 记录旧版 exe(kill 之前先探测运行中的 + 版本记录里的), 更新失败时用于恢复
+  const runningExe = getRunningGardenExe();
+  const oldExe = ((info.versions.find(v => v.version === info.currentVersion)) || {}).exe || null;
+  const backupExe = runningExe || oldExe;
+  let oldKilled = false;
 
   try {
     const ver = String(targetVersion || '').trim();
@@ -324,36 +422,60 @@ async function performUpdate(targetVersion) {
     const url = GARDEN_DOWNLOAD_URL.replace(/\{v\}/g, ver);
     log(`开始更新到版本 ${ver}，下载地址: ${url}`);
 
-    // 1) 结束正在运行的花妖
-    const killed = killGardenProcesses();
-    log(killed.length ? `已结束运行中的花妖进程: ${killed.join(', ')}` : '未发现运行中的花妖进程');
-
-    // 2) 下载
+    // ---- 先完成所有可能失败的准备步骤(下载/校验/解压/定位), 全部成功后才动运行中的花妖 ----
+    // 1) 下载 + 校验
     log('正在下载压缩包…');
     const zip = await downloadToTemp(url);
+    let zipSize = 0;
+    try { zipSize = fs.statSync(zip).size; } catch { /* ignore */ }
+    if (zipSize <= 0) throw new Error('下载内容为空');
+    if (!isValidZip(zip)) throw new Error('下载的文件不是有效的 zip 压缩包(可能是版本号错误或文件损坏)');
 
-    // 3) 解压
-    log('下载完成，正在解压…');
+    // 2) 解压到临时目录(不能直接解压到正式目录: 同版本更新时旧 exe 正被运行进程占用会写入失败)
+    log(`下载完成(${Math.round(zipSize / 1024)} KB)，正在解压…`);
     const verDir = path.join(GARDEN_INSTALL_DIR, `v${ver}`);
-    try { fs.rmSync(verDir, { recursive: true, force: true }); } catch { /* ignore */ }
-    if (!extractZip(zip, verDir)) {
-      try { fs.unlinkSync(zip); } catch {}
-      throw new Error('解压失败');
-    }
+    const tmpDir = path.join(GARDEN_INSTALL_DIR, `.tmp-${ver}-${Date.now()}`);
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    const extracted = await extractZip(zip, tmpDir);
     try { fs.unlinkSync(zip); } catch { /* ignore */ }
+    if (!extracted) {
+      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
+      throw new Error('解压失败(压缩包可能已损坏)');
+    }
 
-    // 4) 定位并启动新版花妖
-    const exe = findGardenExe(verDir, ver);
-    if (!exe) throw new Error(`解压后未找到可执行文件(${GARDEN_EXE_NAME.replace(/\{v\}/g, ver)})`);
-    log(`找到启动程序: ${exe}`);
-    // 预先放行防火墙, 避免首次启动弹出 Windows "允许联网" 对话框
+    // 3) 定位新版主程序(解压产物校验), 找不到说明包内容不对
+    const tmpExe = findGardenExe(tmpDir, ver);
+    if (!tmpExe) {
+      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
+      throw new Error(`解压后未找到可执行文件(${GARDEN_EXE_NAME.replace(/\{v\}/g, ver)})`);
+    }
+    log(`新版程序就绪: ${tmpExe}`);
+
+    // ---- 准备就绪, 开始切换 ----
+    // 4) 结束正在运行的花妖(释放旧 exe 文件占用)
+    const killed = killGardenProcesses();
+    oldKilled = true;
+    log(killed.length ? `已结束运行中的花妖进程: ${killed.join(', ')}` : '未发现运行中的花妖进程');
+    await sleep(500); // 等进程完全退出、文件句柄释放
+
+    // 5) 把临时目录移入正式版本目录(此时旧目录可安全删除)
+    try { fs.rmSync(verDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    try { fs.renameSync(tmpDir, verDir); } catch (e) {
+      throw new Error('安装目录移动失败: ' + e.message);
+    }
+    const exe = path.join(verDir, path.relative(tmpDir, tmpExe));
+    log(`已安装到: ${exe}`);
+
+    // 6) 预先放行防火墙, 避免首次启动弹出 Windows "允许联网" 对话框
     const fw = addFirewallRule(exe);
     log(fw ? '已预添加防火墙放行规则' : '未能添加防火墙规则(服务可能需要以管理员身份运行), 若弹出联网提示请手动允许');
+
+    // 7) 启动新版
     const child = spawn(exe, [], { cwd: path.dirname(exe), detached: true, stdio: 'ignore', windowsHide: false });
     child.unref();
     log(`已启动新版花妖 (PID ${child.pid})`);
 
-    // 等待新版花妖窗口就绪后再返回, 避免前端立即刷新截图时程序还没启动完
+    // 7) 等待新版花妖窗口就绪后再返回, 避免前端立即刷新截图时程序还没启动完
     const winReady = await waitForGardenWindow();
     if (winReady) {
       await sleep(1000); // 窗口出现后再等 1 秒, 让界面稳定
@@ -362,7 +484,7 @@ async function performUpdate(targetVersion) {
       log('等待新版花妖窗口超时(可稍后手动刷新画面)');
     }
 
-    // 5) 记录版本信息
+    // 9) 记录版本信息
     const now = new Date().toISOString();
     if (info.currentVersion !== ver) {
       info.lastVersion = info.currentVersion; // 仅版本变化时才更新"上一版本"
@@ -380,6 +502,14 @@ async function performUpdate(targetVersion) {
     return { ok: true, message: `已更新到 ${ver} 并启动`, version: ver, steps, info };
   } catch (e) {
     log(`更新失败: ${e.message}`);
+    // 兜底: 若旧版已被结束但更新中途失败, 尝试恢复旧版, 避免操控台失联
+    if (oldKilled && backupExe && fs.existsSync(backupExe)) {
+      try {
+        const rc = spawn(backupExe, [], { cwd: path.dirname(backupExe), detached: true, stdio: 'ignore', windowsHide: false });
+        rc.unref();
+        log(`已尝试恢复旧版花妖: ${backupExe}`);
+      } catch { /* ignore */ }
+    }
     return { ok: false, error: 'update failed', message: e.message, steps };
   }
 }
@@ -413,7 +543,39 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === 'POST' && url === '/api/control/shot') {
-    return controlAction(res, 'control-shot.ahk', []);
+    // 刷新前先确保花妖在运行(被杀/退出后自动拉起, 进程检测防重复启动)
+    const ensured = await ensureGardenRunning();
+    // 刚拉起但窗口尚未就绪: 不截图, 提示稍后刷新, 避免截到未启动完的画面
+    if (ensured.started && !ensured.ready) {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+      return res.end(JSON.stringify({ ok: false, autoStarted: true, message: '花妖正在启动，请稍后再刷新画面' }));
+    }
+    const extra = {};
+    if (ensured.started) extra.autoStarted = true;
+    else if (ensured.error) extra.ensureError = ensured.error;
+    return controlAction(res, 'control-shot.ahk', [], extra);
+  }
+
+  // 重启花妖: 结束进程后重新启动当前版本(复用 killGardenProcesses + ensureGardenRunning)
+  if (req.method === 'POST' && url === '/api/control/restart') {
+    const killed = killGardenProcesses();
+    await sleep(600); // 等进程退出、文件句柄释放
+    const ensured = await ensureGardenRunning();
+    if (ensured.error) {
+      res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+      return res.end(JSON.stringify({ ok: false, message: ensured.error }));
+    }
+    if (ensured.started && !ensured.ready) {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+      return res.end(JSON.stringify({ ok: false, message: '花妖正在启动，请稍后再刷新画面' }));
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+    return res.end(JSON.stringify({
+      ok: true,
+      killed: killed.length,
+      autoStarted: !!ensured.started,
+      message: killed.length ? '花妖已重新启动' : '花妖未在运行，已启动最新版',
+    }));
   }
 
   if (req.method === 'POST' && url === '/api/control/click') {

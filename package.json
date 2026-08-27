@@ -6,5 +6,8 @@
   "scripts": {
     "start": "node start.js"
   },
-  "private": true
+  "private": true,
+  "dependencies": {
+    "yauzl": "^2.10.0"
+  }
 }
