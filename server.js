@@ -431,6 +431,8 @@ async function performUpdate(targetVersion) {
   const oldExe = ((info.versions.find(v => v.version === info.currentVersion)) || {}).exe || null;
   const backupExe = runningExe || oldExe;
   let oldKilled = false;
+  let zipFile = null; // 下载临时文件(无论成功/失败, finally 兜底清理)
+  let tmpDir = null;  // 解压临时目录(同上)
 
   try {
     const ver = String(targetVersion || '').trim();
@@ -451,7 +453,8 @@ async function performUpdate(targetVersion) {
     // ---- 先完成所有可能失败的准备步骤(下载/校验/解压/定位), 全部成功后才动运行中的花妖 ----
     // 1) 下载 + 校验
     log('正在下载压缩包…');
-    const zip = await downloadToTemp(url);
+    zipFile = await downloadToTemp(url);
+    const zip = zipFile;
     let zipSize = 0;
     try { zipSize = fs.statSync(zip).size; } catch { /* ignore */ }
     if (zipSize <= 0) throw new Error('下载内容为空');
@@ -460,7 +463,7 @@ async function performUpdate(targetVersion) {
     // 2) 解压到临时目录(不能直接解压到正式目录: 同版本更新时旧 exe 正被运行进程占用会写入失败)
     log(`下载完成(${Math.round(zipSize / 1024)} KB)，正在解压…`);
     const verDir = path.join(GARDEN_INSTALL_DIR, `v${ver}`);
-    const tmpDir = path.join(GARDEN_INSTALL_DIR, `.tmp-${ver}-${Date.now()}`);
+    tmpDir = path.join(GARDEN_INSTALL_DIR, `.tmp-${ver}-${Date.now()}`);
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
     const extracted = await extractZip(zip, tmpDir);
     try { fs.unlinkSync(zip); } catch { /* ignore */ }
@@ -537,6 +540,10 @@ async function performUpdate(targetVersion) {
       } catch { /* ignore */ }
     }
     return { ok: false, error: 'update failed', message: e.message, steps };
+  } finally {
+    // 兜底清理: 无论成功/失败/异常, 确保下载临时文件与解压临时目录都被清除
+    if (zipFile) { try { fs.unlinkSync(zipFile); } catch { /* ignore */ } }
+    if (tmpDir) { try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ } }
   }
 }
 
