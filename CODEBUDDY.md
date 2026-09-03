@@ -29,12 +29,12 @@
 
 ### API（全部为远程操控相关）
 
-- `POST /api/control/shot` → 运行 `control-shot.ahk`，把花妖窗口置于前台并截图。截图前会先 `ensureGardenRunning()`：按**当前版本 exe 完整路径精确匹配**检测运行情况——当前版本没在运行（被杀/退出）或跑的是其他旧版本时，结束旧进程并重新启动 `version.json` 记录的当前版本 exe，保证操控的始终是最新版（进程路径匹配 + 服务端锁防重复启动）；等待窗口就绪后截图，响应带 `autoStarted`/`ensureError` 字段供前端提示。
-- `POST /api/control/restart` → 重启花妖：`killGardenProcesses()` 结束进程 → 等 600ms → `ensureGardenRunning()` 启动当前版本并等待窗口就绪。前端顶栏「⏻」按钮调用，成功后自动刷新画面。
+- `POST /api/control/shot` → 运行 `control-shot.ahk`，把花妖窗口置于前台并截图。截图前会先 `ensureGardenRunning()`：按**当前版本 exe 完整路径精确匹配**检测运行情况——当前版本没在运行（被杀/退出）或跑的是其他旧版本时，结束旧进程并重新启动 `version.json` 记录的当前版本 exe，保证操控的始终是最新版（进程路径匹配 + 服务端锁防重复启动）；等待窗口就绪后截图，响应带 `autoStarted`/`ensureError` 字段供前端提示。**未安装兜底**：花妖从未安装（无版本记录）或当前版本 exe 文件丢失时，不做无意义的截图（AHK 必然失败且提示误导），直接返回 `{ok:false, notInstalled:true, reason:'no_record'|'exe_missing', message}` 供前端展示安装引导；版本记录丢失但花妖进程仍在运行时按降级模式放行截图（`degraded`）。
+- `POST /api/control/restart` → 重启花妖：`killGardenProcesses()` 结束进程 → 等 600ms → `ensureGardenRunning()` 启动当前版本并等待窗口就绪。前端顶栏「⏻」按钮调用，成功后自动刷新画面。未安装/程序文件丢失时拒绝重启（不执行 kill），返回 `notInstalled` 标记，前端提示并自动打开安装面板——程序文件丢失但进程还在跑时尤其要避免把唯一实例杀掉后无法恢复。
 - `POST /api/control/click` → 接收 `{x, y}`（截图像素坐标），运行 `control-click.ahk <x> <y>` 执行点击。
 - `POST /api/control/input` → 接收 `{x, y, text, clear}`（截图像素坐标 + 文本 + 是否清空），先把 `text` 写入 `screenshots/input-text.txt`（UTF-8 无 BOM，避免命令行转义），再运行 `control-input.ahk <x> <y> <clear>` 输入文本。
 - `GET /api/control/screenshot` → 返回最新 `control.png`。
-- `GET /api/garden/update` → 返回当前版本信息、更新历史、下载地址配置。
+- `GET /api/garden/update` → 返回当前版本信息、更新历史、下载地址配置，并带 `installed`（当前版本 exe 是否真实存在）与 `installReason`（`ok`/`no_record`/`exe_missing`），前端据此区分"首次安装/重新安装/日常更新"语义。
 - `POST /api/garden/update` → 更新花妖程序。body 传 `{version:"1.5.1"}` 或 `{auto:true}`（自动推算下一版本，末位 +1）。流程：下载 zip → 校验 zip 文件头 → **用 yauzl 解压**（纯 Node 实现，不依赖系统 tar/powershell）到安装目录 `v<版本>/` → 定位主程序 → 结束后正在运行的花妖 → **预先用 `netsh advfirewall` 添加防火墙放行规则（避免首次启动弹 Windows"允许联网"对话框，需管理员权限）** → 启动主程序 → 等待窗口就绪 → 写 `version.json` 与 `update.log`。任一准备步骤失败时旧版花妖不受影响；启动阶段失败会尝试恢复旧版。
 
 **坐标映射机制**：`control-shot.ahk` 把窗口矩形 `(x, y, w, h)` 写入 `control-meta.json`；前端拿到矩形后在截图内计算点击的"截图像素坐标"并传给后端；`control-click.ahk` 重新读取窗口当前位置，把截图像素坐标加上窗口偏移映射为屏幕坐标再点击，随后自动重新截图形成"所见即所得"反馈闭环。因此**窗口移动不影响坐标映射正确性**。
@@ -49,6 +49,7 @@
 - **桌面增强**（检测到 `hover+pointer:fine` 时启用）：鼠标悬停=光标跟随（手动模式）或更新位置提示（直接模式）、单击=直接点击、滚轮缩放、按住拖动平移。桌面端默认直接模式单击即点。
 - **文本输入**：底部第二行常驻「⌨ 输入」按钮。点击画面（`doClick`）时把截图像素坐标存入 `target` 作为"目标输入框"依据；点「输入」弹出底部输入面板（textarea 自动聚焦唤起系统键盘），回车/软键盘发送键确认、Shift+回车换行、可选"发送前清空"开关（默认追加）。发送走 `POST /api/control/input`，成功后面板关闭并刷新画面。键盘弹出时用 `visualViewport` 把面板顶到键盘上方（iOS 适配）。
 - 状态信息只显示**非花妖状态**（截图是否成功、窗口矩形、光标坐标），不判断花妖运行状态。移动端用 toast 提示，桌面端用状态栏。
+- **未安装引导**：截图接口返回 `notInstalled` 时，画面区显示引导卡 `setupCard`（区分"尚未安装"与"程序文件丢失"两种文案/图标，内联 lucide 风格 SVG），按钮跳转更新面板；面板按 `installed`/`installReason` 动态切换标题与按钮文案（安装花妖/重新安装花妖/更新花妖版本），未安装时禁用"自动下一版本"（无当前版本可推算），下载源未配置时引导卡上直接禁用安装按钮并提示配置 `.env`。
 
 ### 文件职责
 

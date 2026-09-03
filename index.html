@@ -54,6 +54,28 @@
     user-select: none; -webkit-user-drag: none; pointer-events: none;
   }
   .empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 15px; text-align: center; padding: 20px; z-index: 1; }
+
+  /* ===== 未安装/环境异常引导卡 ===== */
+  .setup-card { display: none; flex-direction: column; align-items: center; gap: 14px; max-width: 380px; }
+  .setup-card.on { display: flex; }
+  .setup-icon {
+    width: 60px; height: 60px; border-radius: 18px; flex: none;
+    background: rgba(56,189,248,.12); border: 1px solid rgba(56,189,248,.35); color: var(--blue);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .setup-icon.warn { background: rgba(245,158,11,.12); border-color: rgba(245,158,11,.4); color: var(--amber); }
+  .setup-icon svg { width: 30px; height: 30px; }
+  .setup-card h4 { margin: 0; font-size: 17px; font-weight: 800; color: var(--txt); }
+  .setup-card p { margin: 0; font-size: 13px; color: var(--muted); line-height: 1.75; text-align: center; }
+  .setup-btn {
+    height: 46px; padding: 0 28px; border: none; border-radius: 14px;
+    background: linear-gradient(135deg,#0284c7,#38bdf8); color: #fff;
+    font-size: 15px; font-weight: 800; cursor: pointer;
+    box-shadow: 0 4px 18px rgba(56,189,248,.28);
+  }
+  .setup-btn:active { filter: brightness(1.15); transform: translateY(1px); }
+  .setup-btn:disabled { opacity: .45; box-shadow: none; cursor: not-allowed; }
+  .setup-alt { font-size: 12px; color: var(--amber); line-height: 1.6; text-align: center; }
   .loading { position: absolute; inset: 0; z-index: 3; display: none; align-items: center; justify-content: center; background: rgba(0,0,0,.55); }
   .loading.on { display: flex; }
   .spinner { width: 40px; height: 40px; border-radius: 50%; border: 4px solid #ffffff22; border-top-color: var(--blue); animation: spin .8s linear infinite; }
@@ -262,7 +284,16 @@
       <div class="vcursor" id="vcursor"><div class="ring"></div><div class="label" id="vlabel"></div></div>
       <div class="ripple" id="ripple"></div>
     </div>
-    <div class="empty" id="empty">正在获取花妖画面…</div>
+    <div class="empty" id="empty">
+      <div id="emptyMsg">正在获取花妖画面…</div>
+      <div class="setup-card" id="setupCard">
+        <div class="setup-icon" id="setupIcon"></div>
+        <h4 id="setupTitle">花妖尚未安装</h4>
+        <p id="setupDesc"></p>
+        <button class="setup-btn" id="setupGoBtn">立即下载安装</button>
+        <div class="setup-alt" id="setupAlt"></div>
+      </div>
+    </div>
     <div class="loading" id="loading"><div class="spinner"></div></div>
   </div>
 
@@ -299,6 +330,7 @@
     <div class="help-row"><span class="k">⌨ 输入</span><span class="d">先点击画面选中目标输入框，再点「输入」打开面板；回车(或发送键)确认，「清空」开关可覆盖原内容</span></div>
     <div class="help-row"><span class="k">⏻ 重启</span><span class="d">顶栏「⏻」：结束花妖进程后重新启动最新版，适用于花妖卡死/异常时</span></div>
     <div class="help-row"><span class="k">↑ 更新</span><span class="d">顶栏「↑」：下载并更新花妖到新版本，支持输入版本号或自动下一版本</span></div>
+    <div class="help-row"><span class="k">首次使用</span><span class="d">画面提示"花妖尚未安装"时，点引导卡「立即下载安装」按面板指引操作（需先在服务器 .env 配置好下载源）</span></div>
   </div>
 </div>
 
@@ -319,8 +351,8 @@
 </div>
 
 <div class="modal" id="updateModal" role="dialog" aria-modal="true" aria-label="更新花妖版本">
-  <div class="modal-card update-card" id="updateCard">
-    <h3>更新花妖版本 <button id="updateClose" aria-label="关闭">×</button></h3>
+<div class="modal-card update-card" id="updateCard">
+  <h3><span id="updateTitleText">更新花妖版本</span> <button id="updateClose" aria-label="关闭">×</button></h3>
     <div class="update-info" id="updateInfo">加载中…</div>
     <div class="update-field">
       <label for="updateVersion">目标版本号</label>
@@ -348,7 +380,9 @@
 <script>
   const $ = id => document.getElementById(id);
   const dot=$('dot'), sub=$('sub'), stage=$('stage'), viewport=$('viewport'), img=$('ctrlImg'),
-    empty=$('empty'), loading=$('loading'), msg=$('msg'), meta=$('meta'),
+    empty=$('empty'), emptyMsg=$('emptyMsg'), loading=$('loading'), msg=$('msg'), meta=$('meta'),
+    setupCard=$('setupCard'), setupIcon=$('setupIcon'), setupTitle=$('setupTitle'),
+    setupDesc=$('setupDesc'), setupGoBtn=$('setupGoBtn'), setupAlt=$('setupAlt'),
     vcursor=$('vcursor'), vlabel=$('vlabel'), ripple=$('ripple'),
     zoomInBtn=$('zoomInBtn'), zoomOutBtn=$('zoomOutBtn'), resetBtn=$('resetBtn'),
     refreshBtn=$('refreshBtn'), zoomVal=$('zoomVal'), clickBtn=$('clickBtn'),
@@ -358,6 +392,7 @@
     inputClose=$('inputClose'), inputCancel=$('inputCancel'), inputSend=$('inputSend'),
     inputArea=$('inputArea'), clearSwitch=$('clearSwitch'),
     updateBtn=$('updateBtn'), updateModal=$('updateModal'), updateCard=$('updateCard'),
+    updateTitleText=$('updateTitleText'),
     updateClose=$('updateClose'), updateInfo=$('updateInfo'), updateVersion=$('updateVersion'),
     updateAuto=$('updateAuto'), updateGo=$('updateGo'), updateSteps=$('updateSteps'),
     restartBtn=$('restartBtn'),
@@ -375,6 +410,46 @@
   function toast(t){ toastEl.textContent=t; toastEl.classList.add('show'); clearTimeout(toastEl._t); toastEl._t=setTimeout(()=>toastEl.classList.remove('show'),1800); }
   function setBusy(b){ busy=b; loading.classList.toggle('on', b); }
   function setReady(ok){ dot.className='dot '+(ok?'ready':'err'); }
+
+  // ===== 空态 / 未安装引导 =====
+  // lucide 风格内联 SVG 图标
+  const ICON_DOWNLOAD = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>';
+  const ICON_WARN = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>';
+  function showEmpty(text){
+    setupCard.classList.remove('on');
+    emptyMsg.textContent = text;
+    emptyMsg.style.display = '';
+    empty.style.display = 'flex';
+  }
+  // 花妖未安装(reason='no_record')或程序文件丢失(reason='exe_missing')时,
+  // 用引导卡替代普通空态, 引导用户进入安装面板完成首次安装/重装
+  function showSetup(reason){
+    const fileLost = reason === 'exe_missing';
+    empty.style.display = 'flex';
+    emptyMsg.style.display = 'none';
+    setupIcon.classList.toggle('warn', fileLost);
+    setupIcon.innerHTML = fileLost ? ICON_WARN : ICON_DOWNLOAD;
+    setupTitle.textContent = fileLost ? '花妖程序文件丢失' : '花妖尚未安装';
+    setupDesc.textContent = fileLost
+      ? '找不到已安装的花妖主程序（可能被移动或被杀毒软件误删）。重新下载安装后即可继续使用操控台。'
+      : '操控台需要花妖程序才能工作。首次使用请先下载安装花妖，安装完成后即可开始操控。';
+    setupGoBtn.textContent = fileLost ? '重新下载安装' : '立即下载安装';
+    setupGoBtn.disabled = false;
+    setupAlt.textContent = '';
+    setupCard.classList.add('on');
+    setReady(false);
+    // 探测下载源是否已配置: 未配置时提前禁用按钮并说明原因, 避免用户点进去才发现不可用
+    fetch('/api/garden/update', { cache: 'no-store' })
+      .then(r => r.json().catch(() => ({})))
+      .then(d => {
+        if (!setupCard.classList.contains('on')) return; // 引导卡已被关闭
+        if (d && d.configured === false) {
+          setupGoBtn.disabled = true;
+          setupAlt.textContent = '下载源未配置：请在服务器 .env 中设置 GARDEN_DOWNLOAD_URL 后重启服务';
+        }
+      })
+      .catch(() => {});
+  }
 
   // ===== 模式切换 =====
   function applyMode(){
@@ -478,9 +553,16 @@
     fetch('/api/control/shot',{method:'POST',cache:'no-store'})
       .then(r=>r.json().catch(()=>({})))
       .then(d=>{
+        // 花妖未安装/程序文件丢失: 展示安装引导卡, 引导用户进入安装流程
+        if(d.notInstalled){ toast(d.message||'花妖尚未安装'); showSetup(d.reason); setReady(false); return; }
         if(d.autoStarted) toast('花妖未在运行，已自动重新启动');
         else if(d.ensureError) toast(d.ensureError);
-        if(!d.ok){ toast(d.message||'截图失败'); if(!rect){empty.style.display='flex';empty.textContent=d.message||'截图失败';} setReady(false); return; }
+        if(!d.ok){
+          // 服务器缺少 AutoHotkey: 给出明确的环境修复提示
+          if(d.ahkAvailable===false) showEmpty('服务器未检测到 AutoHotkey v2，截图与操控不可用。请在服务器安装 AutoHotkey v2（或在 .env 配置 AHK_EXE）后重启服务。');
+          else if(!rect) showEmpty(d.message||'截图失败');
+          toast(d.message||'截图失败'); setReady(false); return;
+        }
         rect=d.rect; updateMeta(); setReady(true); if(d.screenshot) showImage(d.screenshot.mtimeMs);
       })
       .catch(()=>{ toast('请求失败'); setReady(false); })
@@ -670,14 +752,28 @@
       .then(r => r.json().catch(() => ({})))
       .then(d => {
         if (d.ok === false) { updateInfo.textContent = d.message || '获取版本信息失败'; return; }
-        const cur = d.currentVersion || '未安装';
+        // 未安装(首次)或程序文件丢失时, 面板切换为"安装"语义, 与日常"更新"区分
+        const missing = d.installed === false;
+        const fileLost = missing && !!d.currentVersion;
+        updateTitleText.textContent = missing ? (fileLost ? '重新安装花妖' : '安装花妖') : '更新花妖版本';
+        const cur = d.currentVersion ? d.currentVersion + (fileLost ? '（文件丢失）' : '') : '未安装';
         const src = d.configured ? (d.downloadUrl || '未知') : '未配置（请在 .env 中设置 GARDEN_DOWNLOAD_URL 后重启服务）';
         updateInfo.innerHTML = '当前版本：<b>' + cur + '</b>' +
           (d.lastUpdated ? ' · 更新于 <span class="dim">' + d.lastUpdated + '</span>' : '') +
-          '<br><span class="dim">下载源：' + src + '</span>';
-        if (d.currentVersion) updateVersion.value = nextVersionStr(d.currentVersion);
-        if (!d.configured) { updateAuto.disabled = true; updateGo.disabled = true; }
-        else { updateAuto.disabled = false; updateGo.disabled = false; }
+          '<br><span class="dim">下载源：' + src + '</span>' +
+          (missing ? '<br><span class="dim">' + (fileLost
+            ? '程序文件已丢失，输入版本号（可与原版本相同）重新下载安装。'
+            : '首次使用请输入要安装的版本号，然后点击「下载安装」。') + '</span>' : '');
+        if (!missing && d.currentVersion) {
+          updateVersion.value = nextVersionStr(d.currentVersion);
+          updateGo.textContent = '更新到此版本';
+        } else {
+          updateVersion.value = '';
+          updateGo.textContent = fileLost ? '重新安装' : '下载安装';
+        }
+        // 未安装时无当前版本可推算, 禁用"自动下一版本"
+        updateAuto.disabled = !d.configured || missing;
+        updateGo.disabled = !d.configured;
       })
       .catch(() => { updateInfo.textContent = '获取版本信息失败'; });
   }
@@ -718,6 +814,7 @@
       .finally(() => setUpdating(false));
   }
   updateBtn.addEventListener('click', openUpdate);
+  setupGoBtn.addEventListener('click', openUpdate);   // 未安装引导卡 -> 安装面板
   updateClose.addEventListener('click', closeUpdate);
   updateModal.addEventListener('click', (e) => { if (e.target === updateModal) closeUpdate(); });
   // ===== 通用确认弹窗 =====
@@ -746,6 +843,8 @@
       .then(r => r.json().catch(() => ({})))
       .then(d => {
         setBusy(false);
+        // 未安装/程序文件丢失时无法重启: 提示并直接打开安装面板
+        if (d.notInstalled) { toast(d.message || '花妖尚未安装'); showSetup(d.reason); openUpdate(); return; }
         if (!d.ok) { toast(d.message || '重启失败'); return; }
         toast(d.message || '花妖已重启');
         doShot(); // 刷新画面展示重启后的花妖

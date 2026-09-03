@@ -242,6 +242,24 @@ function getRunningGardenExe() {
   return list.length ? list[0] : null;
 }
 
+// 判定花妖安装状态(依据 version.json 记录 + 当前版本 exe 文件是否真实存在)
+// reason: 'ok' = 已安装可用; 'no_record' = 从未通过操控台安装过; 'exe_missing' = 有记录但程序文件已丢失
+function getGardenInstallState() {
+  const info = readVersionInfo();
+  if (!info || !info.currentVersion) return { installed: false, reason: 'no_record', info: null, exe: null };
+  const verEntry = (info.versions || []).find(v => v.version === info.currentVersion);
+  const exe = (verEntry && verEntry.exe) || null;
+  if (!exe || !fs.existsSync(exe)) return { installed: false, reason: 'exe_missing', info, exe };
+  return { installed: true, reason: 'ok', info, exe };
+}
+
+// 未安装/程序丢失时的用户可读提示
+function gardenMissingMessage(reason) {
+  return reason === 'exe_missing'
+    ? '花妖程序文件已丢失（可能被移动或杀毒软件误删），请重新下载安装'
+    : '花妖尚未安装，请先下载安装花妖程序';
+}
+
 // 确保花妖在运行: 进程已存在则不动; 不存在且有已安装版本则自动启动
 // 带服务端锁防止并发触发重复启动(进程检测是主防线)
 let gardenEnsureLock = false;
@@ -251,11 +269,19 @@ async function ensureGardenRunning() {
   if (gardenEnsureLock) return { started: false, running: true, locked: true };
   gardenEnsureLock = true;
   try {
-    const info = readVersionInfo();
-    if (!info || !info.currentVersion) return { started: false, running: false, error: '尚未通过操控台安装过花妖' };
-    const verEntry = (info.versions || []).find(v => v.version === info.currentVersion);
-    const exe = verEntry && verEntry.exe;
-    if (!exe || !fs.existsSync(exe)) return { started: false, running: false, error: '已安装的程序文件不存在，请重新更新花妖' };
+    const st = getGardenInstallState();
+    if (!st.installed) {
+      // 记录缺失/程序文件丢失时, 花妖进程可能仍在运行(如文件被删后进程尚未退出):
+      // 此时程序实际可用, 放行截图等操作(degraded 降级模式), 只是无法自动拉起新进程
+      const running = getGardenProcesses();
+      if (running.length) return { started: false, running: true, degraded: true };
+      return {
+        started: false, running: false,
+        notInstalled: true, reason: st.reason,
+        error: gardenMissingMessage(st.reason),
+      };
+    }
+    const exe = st.exe;
 
     // 按完整 exe 路径精确判断当前版本是否在运行(而非只看进程名前缀, 避免误认旧版本进程)
     const norm = (p) => path.resolve(p).toLowerCase();
@@ -515,6 +541,9 @@ async function performUpdate(targetVersion) {
 
     // 9) 记录版本信息
     const now = localTimestamp(); // 本地时区(东八区)时间, 与日志一致
+    // 区分动作语义: 首次安装 / 同版本重装(程序丢失后恢复) / 日常更新
+    const verAction = !info.currentVersion ? '已安装'
+      : (info.currentVersion === ver ? '已重新安装' : '已更新到');
     if (info.currentVersion !== ver) {
       info.lastVersion = info.currentVersion; // 仅版本变化时才更新"上一版本"
     }
@@ -528,7 +557,7 @@ async function performUpdate(targetVersion) {
     writeVersionInfo(info);
 
     log(`更新完成: 当前版本 ${ver}`);
-    return { ok: true, message: `已更新到 ${ver} 并启动`, version: ver, steps, info };
+    return { ok: true, message: `${verAction} ${ver} 并启动`, version: ver, steps, info };
   } catch (e) {
     log(`更新失败: ${e.message}`);
     // 兜底: 若旧版已被结束但更新中途失败, 尝试恢复旧版, 避免操控台失联
@@ -578,6 +607,18 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'POST' && url === '/api/control/shot') {
     // 刷新前先确保花妖在运行(被杀/退出后自动拉起, 进程检测防重复启动)
     const ensured = await ensureGardenRunning();
+    // 花妖未安装/程序文件丢失: 截图必然失败且 AHK 提示有误导性,
+    // 直接返回结构化标记, 由前端展示"下载安装"引导, 不再白跑截图脚本
+    if (ensured.notInstalled) {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+      return res.end(JSON.stringify({
+        ok: false,
+        ahkAvailable: !!AHK,
+        notInstalled: true,
+        reason: ensured.reason,
+        message: ensured.error,
+      }));
+    }
     // 刚拉起但窗口尚未就绪: 不截图, 提示稍后刷新, 避免截到未启动完的画面
     if (ensured.started && !ensured.ready) {
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
@@ -591,6 +632,20 @@ const server = http.createServer(async (req, res) => {
 
   // 重启花妖: 结束进程后重新启动当前版本(复用 killGardenProcesses + ensureGardenRunning)
   if (req.method === 'POST' && url === '/api/control/restart') {
+    // 未安装/程序文件丢失时无法重启: 直接返回引导标记, 不做无意义的 kill
+    const preState = getGardenInstallState();
+    if (!preState.installed) {
+      const stillRunning = getGardenProcesses().length > 0;
+      const msg = gardenMissingMessage(preState.reason) +
+        (stillRunning ? '；为避免唯一运行中的实例被关闭后无法恢复，已跳过本次重启' : '');
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+      return res.end(JSON.stringify({
+        ok: false,
+        notInstalled: true,
+        reason: preState.reason,
+        message: msg,
+      }));
+    }
     const killed = killGardenProcesses();
     await sleep(600); // 等进程退出、文件句柄释放
     const ensured = await ensureGardenRunning();
@@ -654,6 +709,7 @@ const server = http.createServer(async (req, res) => {
   // 查看当前版本信息与下载地址配置
   if (req.method === 'GET' && url === '/api/garden/update') {
     const info = readVersionInfo() || {};
+    const st = getGardenInstallState();
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
     return res.end(JSON.stringify({
       ok: true,
@@ -661,6 +717,8 @@ const server = http.createServer(async (req, res) => {
       lastVersion: info.lastVersion || null,
       lastUpdated: info.lastUpdated || null,
       versions: Array.isArray(info.versions) ? info.versions : [],
+      installed: st.installed,
+      installReason: st.reason,
       downloadUrl: GARDEN_DOWNLOAD_URL || null,
       configured: !!GARDEN_DOWNLOAD_URL,
       installDir: GARDEN_INSTALL_DIR,
