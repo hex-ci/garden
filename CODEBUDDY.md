@@ -37,7 +37,7 @@
 - `GET /api/garden/update` → 返回当前版本信息、更新历史、下载地址配置，并带 `installed`（当前版本 exe 是否真实存在）与 `installReason`（`ok`/`no_record`/`exe_missing`），前端据此区分"首次安装/重新安装/日常更新"语义。
 - `POST /api/garden/update` → 更新花妖程序。body 传 `{version:"1.5.1"}` 或 `{auto:true}`（自动推算下一版本，末位 +1）。流程：下载 zip → 校验 zip 文件头 → **用 yauzl 解压**（纯 Node 实现，不依赖系统 tar/powershell）到安装目录 `v<版本>/` → 定位主程序 → 结束后正在运行的花妖 → **预先用 `netsh advfirewall` 添加防火墙放行规则（避免首次启动弹 Windows"允许联网"对话框，需管理员权限）** → 启动主程序 → 等待窗口就绪 → 写 `version.json` 与 `update.log`。任一准备步骤失败时旧版花妖不受影响；启动阶段失败会尝试恢复旧版。
 
-**坐标映射机制**：`control-shot.ahk` 把窗口矩形 `(x, y, w, h)` 写入 `control-meta.json`；前端拿到矩形后在截图内计算点击的"截图像素坐标"并传给后端；`control-click.ahk` 重新读取窗口当前位置，把截图像素坐标加上窗口偏移映射为屏幕坐标再点击，随后自动重新截图形成"所见即所得"反馈闭环。因此**窗口移动不影响坐标映射正确性**。
+**坐标映射机制**：`control-shot.ahk` 把窗口矩形 `(x, y, w, h)` 写入 `control-meta.json`；前端拿到矩形后在截图内计算点击的"截图像素坐标"并传给后端；`control-click.ahk` 重新读取窗口位置，把截图像素坐标减去客户区原点偏移（标题栏/边框）换算为窗口客户区坐标，再用 `ControlClick(NA)` 向窗口投递消息点击，随后自动重新截图形成"所见即所得"反馈闭环。因此**窗口移动不影响坐标映射正确性**；且不移动真实鼠标、不要求窗口前台——**远程桌面最小化/窗口被遮挡时截图(PrintWindow)与点击(ControlClick)均正常工作**（2026-09-05 实测；模拟真实鼠标在 RDP 最小化时会失效，故弃用。裸 PostMessage 主窗口/子窗口对 WebView2 均无效，勿改用）。
 
 ### 前端（index.html）
 
@@ -55,10 +55,10 @@
 
 - `server.js`：HTTP 服务器 + 零依赖 `.env` 加载器 + AHK 定位（优先 `AHK_EXE` 环境变量，回退常见安装路径）+ 子进程管理 + 3 个操控 API + 花妖更新（下载/校验/yauzl 解压/防火墙/拉起）。可配置项：`PORT`/`HOST`/`AHK_EXE`/`GARDEN_DOWNLOAD_URL` 等。花妖窗口标题(`"花妖"`)与标准尺寸(406x883)为固定常量，硬编码于脚本中，不做外部化。
 - `index.html`：全屏操控界面（内联 CSS/JS），缩放/平移/准星/方向键微调等交互都在此实现。
-- `garden-lib.ahk`：公共库 —— `LogMsg`/`ResetLog`/`ShowBigLabel`/`CaptureRectToFile`/`SaveControlScreenshot`/`WriteControlMeta`/`EnsureHuaYaoWindow` 等工具函数。`EnsureHuaYaoWindow` 统一处理花妖窗口可见性：开启 `DetectHiddenWindows` 匹配托盘隐藏窗口、`WinShow`/`WinRestore` 恢复显示，矩形无效(0x0，Tauri 隐藏恢复后位置丢失)时自动 `WinMove` 重定位到屏幕居中(406x883)，全程 try/catch 失败返回友好提示而非报错中断。三个控制脚本(shot/click/input)均调用它。还残留 `ScanColorBlocks`/`CaptureRectToFile` 等旧状态识别的死代码（无调用方，可安全删除，不影响功能）。
+- `garden-lib.ahk`：公共库 —— `LogMsg`/`ResetLog`/`ShowBigLabel`/`CaptureRectToFile`/`SaveControlScreenshot`/`WriteControlMeta`/`EnsureHuaYaoWindow` 等工具函数。`EnsureHuaYaoWindow` 统一处理花妖窗口可见性：开启 `DetectHiddenWindows` 匹配托盘隐藏窗口、`WinShow`/`WinRestore` 恢复显示，矩形无效(0x0，Tauri 隐藏恢复后位置丢失)时自动 `WinMove` 重定位到屏幕居中(406x883)，全程 try/catch 失败返回友好提示而非报错中断。三个控制脚本(shot/click/input)均调用它。还残留 `ScanColorBlocks`/`CaptureRectToFile` 等旧状态识别的死代码（无调用方，可安全删除，不影响功能）。`SaveControlScreenshot` 用 `PrintWindow(PW_RENDERFULLCONTENT)`（flag 0x2，整窗含标题栏，尺寸=窗口矩形）直接抓花妖窗口而非抓屏幕：远程桌面窗口最小化后 Windows 挂起会话的屏幕渲染，抓屏幕必然全黑，而窗口内容不依赖屏幕合成仍可正常截图（2026-09-05 实测验证）；HBITMAP 编码存盘仍交给 ImagePut。勿改用 ImagePut.WindowToBitmap（0x3 仅客户区会破坏前端坐标映射，且其 PostMessage 权限探测在非提权环境会误报）。截图脚本须提权运行（花妖进程为提权进程，由提权服务 spawn，天然满足）。
 - `control-shot.ahk`：把花妖窗口置于前台并截图，写 `control.png` + `control-meta.json`。
-- `control-click.ahk`：按截图像素坐标映射到屏幕坐标后点击，点击后再截图反馈。
-- `control-input.ahk`：接收 `<sx> <sy> <clear>`，先点击目标坐标确保输入框焦点，再从 `input-text.txt` 读文本写入剪贴板后 `Ctrl+V` 粘贴（clear=1 先 `Ctrl+A` 全选覆盖，clear=0 先 `^{End}` 定位到末尾追加），最后截图反馈。
+- `control-click.ahk`：把截图像素坐标换算为窗口客户区坐标后用 `ControlClick(NA)` 投递消息点击（无需激活窗口、后台生效），点击后再截图反馈。
+- `control-input.ahk`：接收 `<sx> <sy> <clear>`，先点击目标坐标确保输入框焦点，再从 `input-text.txt` 读文本写入剪贴板后 `Ctrl+V` 粘贴（clear=1 先 `Ctrl+A` 全选覆盖，clear=0 先 `^{End}` 定位到末尾追加），最后截图反馈。文本输入依赖真实键盘注入，必须花妖在前台：激活后校验 `WinActive`，未在前台（如 RDP 最小化）时拒绝输入并提示，防止键盘事件误伤其他前台程序；后台文本输入需 CDP 方案，暂未实施。
 - `image-put.ahk`：第三方库（上游名为 `ImagePut.ahk`），用于精确截图和 GDI+ 操作，勿修改。同步上游更新时注意替换回原名。
 - `status.json` / `screenshots/`：运行时生成的状态与截图文件（前端已不读 `status.json`）。
 - `hua-yao/`：花妖程序安装目录（下载解压产物，已 .gitignore）。内含 `version.json`（版本信息）与 `update.log`（更新日志）。

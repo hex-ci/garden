@@ -42,6 +42,15 @@ if !EnsureHuaYaoWindow(&wx, &wy, &ww, &wh, &errMsg) {
     ExitApp(2)
 }
 
+; 文本输入依赖真实键盘注入(Ctrl+V), 必须确保花妖确实在前台:
+; 远程桌面最小化等场景下激活可能静默失败, 此时继续发送键盘事件会误伤当前前台程序
+if !WinActive(WinTitle) {
+    WriteControlMeta(0, 0, 0, 0, false, "花妖窗口未在前台，暂无法输入文本（请先恢复远程桌面窗口再试）")
+    LogMsg("激活后仍不在前台, 中止输入")
+    RestorePrevWindow(prevHwnd)
+    ExitApp(2)
+}
+
 ; 读取待输入文本(后端通过临时文件传递, 避免命令行转义问题, 支持任意字符)
 textFile := A_ScriptDir "\screenshots\input-text.txt"
 if !FileExist(textFile) {

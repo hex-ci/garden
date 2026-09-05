@@ -1,10 +1,11 @@
 #Requires AutoHotkey v2.0
 #SingleInstance Off
 
-; 远程操控模式: 按截图坐标点击花妖窗口, 点击后自动重新截图形成反馈闭环
+; 远程操控模式: 按截图坐标向花妖窗口投递消息点击(后台点击), 点击后自动重新截图形成反馈闭环
 ; 用法: control-click.ahk <sx> <sy>
 ;   sx/sy 为截图像素坐标, 原点 = 窗口左上角(即 screenshots\control.png 内的坐标)
-;   脚本会重新读取窗口矩形, 把截图坐标映射为屏幕坐标后执行点击
+;   脚本把截图坐标(窗口矩形系)换算为窗口客户区坐标后, 用 ControlClick(NA) 投递点击消息:
+;   不移动真实鼠标、不要求窗口在前台, 远程桌面最小化/窗口被遮挡时也能正常点击(2026-09-05 实测)
 #Include garden-lib.ahk
 
 DryRun := false
@@ -23,35 +24,41 @@ try {
     ExitApp(2)
 }
 
-CoordMode("Mouse", "Screen")
-SetMouseDelay(30)
-
 prevHwnd := WinExist("A")
 
 EnsureScreenshotDir()
 ResetLog()
 LogMsg("=== 操控点击脚本开始: 截图坐标 (" sx "," sy ") ===")
 
-; 确保花妖窗口可见并激活(处理最小化到托盘/最小化, 失败给出友好提示不中断)
-if !EnsureHuaYaoWindow(&wx, &wy, &ww, &wh, &errMsg) {
+; 确保花妖窗口可见(处理托盘隐藏/最小化, 失败给出友好提示不中断)
+; 后台消息点击无需激活窗口, activate=false 避免抢焦点
+if !EnsureHuaYaoWindow(&wx, &wy, &ww, &wh, &errMsg, false) {
     WriteControlMeta(0, 0, 0, 0, false, errMsg)
     RestorePrevWindow(prevHwnd)
     ExitApp(2)
 }
+hwnd := WinExist(WinTitle)
 
-cx := wx + sx
-cy := wy + sy
-LogMsg("屏幕坐标: " cx "," cy)
+; 截图坐标基于窗口矩形(含标题栏), 消息点击坐标基于窗口客户区: 先算客户区原点偏移
+DllCall("GetClientRect", "ptr", hwnd, "ptr", rc := Buffer(16))
+pt := Buffer(8)
+NumPut("int", 0, "int", 0, pt, 0)
+DllCall("ClientToScreen", "ptr", hwnd, "ptr", pt)
+offX := NumGet(pt, 0, "int") - wx
+offY := NumGet(pt, 4, "int") - wy
 
-; 模拟真实鼠标点击: 移动 -> 按下 -> 抬起
-MouseMove(cx, cy)
-Sleep(50)
-Click(cx, cy)
-LogMsg("已点击 (" cx "," cy ")")
+ccx := sx - offX
+ccy := sy - offY
+LogMsg("客户区坐标: " ccx "," ccy " (客户区偏移 " offX "," offY ")")
+
+; 后台消息点击(ControlClick NA): 直接向窗口投递点击消息, 不移动真实鼠标、不依赖窗口前台。
+; 模拟真实鼠标(SendInput)在远程桌面最小化时会失效, 消息点击不受影响(2026-09-05 实测验证)。
+ControlClick("X" ccx " Y" ccy, hwnd, , "Left", 1, "NA")
+LogMsg("已点击 (" sx "," sy ")")
 
 ; 给程序响应留出时间, 再截图反馈, 形成"所见即所得"闭环
 Sleep(400)
-if !EnsureHuaYaoWindow(&wx, &wy, &ww, &wh, &errMsg) {
+if !EnsureHuaYaoWindow(&wx, &wy, &ww, &wh, &errMsg, false) {
     WriteControlMeta(0, 0, 0, 0, false, errMsg)
     RestorePrevWindow(prevHwnd)
     ExitApp(2)

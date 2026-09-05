@@ -1,7 +1,8 @@
 #Requires AutoHotkey v2.0
 #SingleInstance Off
 
-; 远程操控模式: 把花妖窗口置于前台并截图
+; 远程操控模式: 恢复花妖窗口可见并截图(不激活、不抢前台)
+; 截图走 PrintWindow 抓窗口, 不需要窗口在前台; 仅在托盘隐藏/最小化时恢复显示(不激活)
 ; 输出: screenshots\control.png + screenshots\control-meta.json(窗口矩形)
 ; 供网页操控界面显示画面并映射点击坐标
 #Include garden-lib.ahk
@@ -21,8 +22,9 @@ EnsureScreenshotDir()
 ResetLog()
 LogMsg("=== 操控截图脚本开始 ===")
 
-; 确保花妖窗口可见并激活(处理最小化到托盘/最小化, 失败给出友好提示不中断)
-if !EnsureHuaYaoWindow(&wx, &wy, &ww, &wh, &errMsg) {
+; 确保花妖窗口可见(处理托盘隐藏/最小化, 失败给出友好提示不中断)
+; activate=false: 截图不需要前台, 不抢用户当前正在操作的窗口
+if !EnsureHuaYaoWindow(&wx, &wy, &ww, &wh, &errMsg, false) {
     WriteControlMeta(0, 0, 0, 0, false, errMsg)
     LogMsg("窗口不可用: " errMsg)
     RestorePrevWindow(prevHwnd)

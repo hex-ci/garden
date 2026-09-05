@@ -259,19 +259,39 @@ EnsureScreenshotDir() {
 ; 截图保存到 screenshots\control.png, 窗口矩形写入 screenshots\control-meta.json
 ; 供 Node.js 后端读取窗口矩形, 将截图坐标映射为屏幕坐标执行点击
 ;
-; @param x, y, w, h 窗口在屏幕上的位置与尺寸(像素)
+; 截图方式: PrintWindow(PW_RENDERFULLCONTENT) 直接抓花妖窗口内容, 而非抓屏幕矩形。
+; 原因: 远程桌面(RDP)窗口最小化后 Windows 会挂起会话的屏幕渲染, 屏幕截图必然全黑;
+; 而窗口内容由窗口自身渲染提供, 不依赖屏幕合成, RDP 最小化/窗口被遮挡时仍可正常截图(已实测)。
+; 输出尺寸 = 窗口矩形(含标题栏), 与 control-meta.json 的坐标语义一致, 前端映射无需改动。
+;
+; @param x, y, w, h 窗口在屏幕上的位置与尺寸(像素, 仅用于确定输出尺寸)
 ; @returns 成功返回 true
 SaveControlScreenshot(x, y, w, h) {
     dir := A_ScriptDir "\screenshots"
     if !DirExist(dir)
         try DirCreate(dir)
     filepath := dir "\control.png"
-    try {
-        ImagePut("File", [x, y, w, h], filepath, 100)
-    } catch {
+    hwnd := WinExist(WinTitle)
+    if !hwnd
         return false
+    printed := false
+    try {
+        hdcWin := DllCall("GetWindowDC", "ptr", hwnd, "ptr")
+        hdcMem := DllCall("CreateCompatibleDC", "ptr", hdcWin, "ptr")
+        hbm := DllCall("CreateCompatibleBitmap", "ptr", hdcWin, "int", w, "int", h, "ptr")
+        obm := DllCall("SelectObject", "ptr", hdcMem, "ptr", hbm, "ptr")
+        ; 0x2 = PW_RENDERFULLCONTENT(整窗含标题栏; 若加 0x1 PW_CLIENTONLY 会裁掉标题栏, 破坏坐标映射)
+        printed := DllCall("user32\PrintWindow", "ptr", hwnd, "ptr", hdcMem, "uint", 2)
+        if printed
+            ImagePut("File", hbm, filepath, 100)   ; HBITMAP 编码存盘仍交给 ImagePut
+        DllCall("SelectObject", "ptr", hdcMem, "ptr", obm)
+        DllCall("DeleteObject", "ptr", hbm)
+        DllCall("DeleteDC", "ptr", hdcMem)
+        DllCall("ReleaseDC", "ptr", hwnd, "ptr", hdcWin)
+    } catch {
+        printed := false
     }
-    return FileExist(filepath)
+    return printed && FileExist(filepath)
 }
 
 /**
@@ -314,8 +334,9 @@ RestorePrevWindow(hwnd) {
 ;   3) WinActivate/WinWaitActive 全程 try/catch, 失败返回友好提示而非让脚本报错中断
 ; @param wx wy ww wh 输出窗口矩形(按引用传参)
 ; @param errMsg      失败时的中文提示(按引用传参)
+; @param activate    是否激活窗口置前(默认 true 保持原行为; 后台消息点击无需前台, 传 false 避免抢焦点)
 ; @returns true=成功; false=失败
-EnsureHuaYaoWindow(&wx, &wy, &ww, &wh, &errMsg) {
+EnsureHuaYaoWindow(&wx, &wy, &ww, &wh, &errMsg, activate := true) {
     DetectHiddenWindows(true)
     hwnd := WinExist(WinTitle)
     if !hwnd {
@@ -323,22 +344,33 @@ EnsureHuaYaoWindow(&wx, &wy, &ww, &wh, &errMsg) {
         return false
     }
     ; 窗口存在但被隐藏(托盘)或最小化 -> 先恢复显示
+    ; activate=false 时用 SW_SHOWNOACTIVATE(4) 恢复: 让窗口可见但不抢前台, 不打扰用户当前操作
     if !DllCall("IsWindowVisible", "Ptr", hwnd) {
         LogMsg("花妖窗口隐藏，尝试从托盘恢复显示")
-        try WinShow(hwnd)
+        if activate {
+            try WinShow(hwnd)
+        } else {
+            DllCall("ShowWindow", "Ptr", hwnd, "Int", 4)   ; SW_SHOWNOACTIVATE
+        }
     }
     if WinGetMinMax(hwnd) = -1 {
         LogMsg("花妖窗口已最小化，尝试还原")
-        try WinRestore(hwnd)
+        if activate {
+            try WinRestore(hwnd)
+        } else {
+            DllCall("ShowWindow", "Ptr", hwnd, "Int", 4)   ; SW_SHOWNOACTIVATE
+        }
     }
     Sleep(150)
-    ; 激活窗口(失败也不中断脚本, 给出可操作的提示)
-    try {
-        WinActivate(hwnd)
-        WinWaitActive(hwnd, , 1)
-    } catch {
-        errMsg := "无法激活花妖窗口，请从系统托盘点击花妖图标恢复"
-        return false
+    ; 激活窗口(失败也不中断脚本, 给出可操作的提示); activate=false 时跳过(后台消息点击无需前台)
+    if activate {
+        try {
+            WinActivate(hwnd)
+            WinWaitActive(hwnd, , 1)
+        } catch {
+            errMsg := "无法激活花妖窗口，请从系统托盘点击花妖图标恢复"
+            return false
+        }
     }
     WinGetPos(&wx, &wy, &ww, &wh, hwnd)
     ; Tauri 窗口从托盘隐藏恢复后, 矩形可能仍是 0x0(位置信息丢失)。
