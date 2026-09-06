@@ -4,9 +4,24 @@ import express from 'express';
 import * as capture from './capture.js';
 import { runUiaProbe } from './uia-probe.js';
 import { initLive, noteActivity } from './live.js';
-import { HOST, PORT, PUBLIC_DIR, GARDEN_DOWNLOAD_URL, GARDEN_INSTALL_DIR } from './config.js';
+import {
+  HOST,
+  PORT,
+  PUBLIC_DIR,
+  GARDEN_DOWNLOAD_URL,
+  GARDEN_INSTALL_DIR,
+} from './config.js';
 import { logControl } from './logger.js';
-import { ensureGardenRunning, getGardenInstallState, getGardenProcesses, gardenMissingMessage, killGardenProcesses, nextVersion, readVersionInfo, sleep } from './garden.js';
+import {
+  ensureGardenRunning,
+  getGardenInstallState,
+  getGardenProcesses,
+  gardenMissingMessage,
+  killGardenProcesses,
+  nextVersion,
+  readVersionInfo,
+  sleep,
+} from './garden.js';
 import { performUpdate } from './updater.js';
 
 const app = express();
@@ -21,8 +36,14 @@ let probeCache = { key: '', at: 0, result: null };
 
 async function captureShot() {
   const frame = await capture.captureFrame();
+
   return {
-    rect: { x: frame.origin.x, y: frame.origin.y, w: frame.width, h: frame.height },
+    rect: {
+      x: frame.origin.x,
+      y: frame.origin.y,
+      w: frame.width,
+      h: frame.height,
+    },
     png: frame.png,
   };
 }
