@@ -464,7 +464,9 @@ async function performUpdate(targetVersion) {
     // 5) 把临时目录移入正式版本目录(此时旧目录可安全删除)
     try { fs.rmSync(verDir, { recursive: true, force: true }); } catch { /* ignore */ }
     try { fs.renameSync(tmpDir, verDir); } catch (e) {
-      throw new Error('安装目录移动失败: ' + e.message);
+      throw new Error('安装目录移动失败: ' + e.message, {
+		    cause: e,
+	    });
     }
     const exe = path.join(verDir, path.relative(tmpDir, tmpExe));
     log(`已安装到: ${exe}`);

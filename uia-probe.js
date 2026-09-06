@@ -108,7 +108,7 @@ function runUiaProbe(pid, px, py) {
   });
 }
 
-export { 
+export {
   buildProbeScript,
   runUiaProbe,
 };

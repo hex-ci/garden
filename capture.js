@@ -210,13 +210,13 @@ function sendTextInput(sx, sy, text, append) {
   return true;
 }
 
-export { 
+export {
   captureFrame,
   clientClick,
-  clientOrigin, 
-  sendTextInput, 
-  findRenderWidgetHwnd, 
-  getTargetPid, 
-  invalidate, 
+  clientOrigin,
+  sendTextInput,
+  findRenderWidgetHwnd,
+  getTargetPid,
+  invalidate,
   getWindow,
 };
