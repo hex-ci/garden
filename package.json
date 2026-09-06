@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "start": "node server/start.js",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "test": "vitest run --testTimeout 20000"
   },
   "private": true,
   "dependencies": {
@@ -22,6 +23,7 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "eslint": "^10.10.0",
-    "globals": "^17.12.0"
+    "globals": "^17.12.0",
+    "vitest": "^5.0.0"
   }
 }

@@ -19,7 +19,7 @@ function updateLog(line) {
 }
 
 // 校验 zip 文件头魔数, 避免下载到错误页面/损坏文件后盲目解压
-function isValidZip(file) {
+export function isValidZip(file) {
   try {
     const fd = fs.openSync(file, 'r');
     const buf = Buffer.alloc(4);
@@ -64,7 +64,7 @@ function downloadToTemp(url) {
 
 // 解压 zip(纯 Node 实现, 基于 yauzl, 不依赖系统 tar/powershell)
 // 使用 lazyEntries + 逐条处理, 正确解析含 data-descriptor 的 zip, 失败/损坏返回 false
-function extractZip(zipFile, destDir) {
+export function extractZip(zipFile, destDir) {
   return new Promise((resolve) => {
     let done = false;
     const finish = (ok) => { if (!done) { done = true; resolve(ok); } };
@@ -96,7 +96,7 @@ function extractZip(zipFile, destDir) {
 }
 
 // 在安装目录内查找启动程序(优先按配置名精确匹配, 回退任意 .exe)
-function findGardenExe(dir, ver) {
+export function findGardenExe(dir, ver) {
   const prefer = GARDEN_EXE_NAME.replace(/\{v\}/g, ver).toLowerCase();
   const walk = (d, depth) => {
     if (depth > 4) return null;
