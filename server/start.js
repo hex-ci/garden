@@ -25,7 +25,7 @@ function q(s) {
 
 if (isElevated() || process.platform !== 'win32') {
   // 已是管理员(或非 Windows 无 UAC 概念)：直接加载服务
-  await import('./server.js');
+  await import('./index.js');
 } else {
   console.log('正在请求管理员权限（用于写入防火墙放行规则）…');
   const ps = spawn('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',

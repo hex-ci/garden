@@ -10,7 +10,7 @@ let child;
 let gardenAvailable = false;   // /shot 成功即认为花妖可用
 
 beforeAll(async () => {
-  child = spawn(process.execPath, ['server/server.js'], {
+  child = spawn(process.execPath, ['server/index.js'], {
     env: { ...process.env, PORT: String(PORT) },
     stdio: 'ignore',
   });

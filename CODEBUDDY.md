@@ -9,7 +9,7 @@
 ## 目录结构
 
 ```
-server/   后端: server.js(Express 核心:路由/静态/WS 挂载) / capture.js(抓帧+消息交互) / live.js(WS 实时画面)
+server/   后端: index.js(Express 核心:路由/静态/WS 挂载) / capture.js(抓帧+消息交互) / live.js(WS 实时画面)
           / uia-probe.js+uia-probe.ps1(UIA 探测) / garden.js(花妖进程/生命周期/安装状态/版本记录) / updater.js(版本更新流水线)
           / config.js(.env 加载+常量) / logger.js(操作日志) / start.js(UAC 提权入口)
 public/   前端: index.html(结构) / css/style.css(样式) / js/app.js(逻辑), 由 express.static 托管(整目录, no-store)
@@ -20,7 +20,7 @@ docs/     文档图片
 
 ## 常用命令
 
-- **启动服务**：`npm start`（等价 `node server/start.js`）。`start.js` 检测管理员权限，非管理员弹 UAC 提权重启（更新花妖写防火墙规则需要），然后加载 `server/server.js`。监听 `0.0.0.0:13000`，`.env` 可覆盖 `PORT`/`HOST`。首次部署 `npm install`。
+- **启动服务**：`npm start`（等价 `node server/start.js`）。`start.js` 检测管理员权限，非管理员弹 UAC 提权重启（更新花妖写防火墙规则需要），然后加载 `server/index.js`。监听 `0.0.0.0:13000`，`.env` 可覆盖 `PORT`/`HOST`。首次部署 `npm install`。
 - **无构建步骤；有 Lint 与测试**：`npm run lint`（ESLint 9 + `eslint.config.js`）——**每次改代码后必须清零**；`npm test`（vitest，tests/ 下 24 用例：版本工具/zip 校验解压/exe 定位单元测试 + 拉起真实服务的集成测试，集成用例对花妖缺失环境自适应降级）——改核心逻辑后运行。改代码后需重启 node 进程。
 - **调试**：`data/logs/control.log`（已 gitignore）记录每次 click/input/shot 的坐标、耗时、结果与安全闸判定，是远程排查的第一入口；默认全量记录，`.env` 设 `CONTROL_LOG=0` 切静默模式（仅失败/拦截），超 1MB 自动滚动。调试协作模式：加日志 → 用户浏览器真实操作 → 读日志定位。
 
@@ -48,7 +48,7 @@ docs/     文档图片
 
 **ps1 文件必须保存为带 BOM 的 UTF-8**（含中文注释；PS5.1 把无 BOM UTF-8 按 GBK 解析会静默炸）。参数名用 `-TargetPid` 而非 `-Pid`（$PID 是 PS 保留自动变量）。
 
-### server.js —— Express 核心（路由/静态资源/JSON 解析/WS 挂载）
+### server/index.js —— Express 核心（路由/静态资源/JSON 解析/WS 挂载）
 
 `app.listen()` 返回的 http.Server 直接交给 `initLive()` 挂 WS。业务能力全部在同级模块，路由内只做编排与响应。`/api/*` 统一挂 `Cache-Control: no-store`；兜底错误中间件处理 JSON 解析失败(400)与未捕获异常(500)。
 
