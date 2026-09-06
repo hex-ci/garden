@@ -35,12 +35,14 @@
   // lucide 风格内联 SVG 图标
   const ICON_DOWNLOAD = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>';
   const ICON_WARN = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>';
+
   function showEmpty(text){
     setupCard.classList.remove('on');
     emptyMsg.textContent = text;
     emptyMsg.style.display = '';
     empty.style.display = 'flex';
   }
+
   // 花妖未安装(reason='no_record')或程序文件丢失(reason='exe_missing')时,
   // 用引导卡替代普通空态, 引导用户进入安装面板完成首次安装/重装
   function showSetup(reason){
@@ -93,6 +95,7 @@
     const dw=nw*fit*zoom, dh=nh*fit*zoom;
     return { left:(vw-dw)/2+pan.x, top:(vh-dh)/2+pan.y, dispW:dw, dispH:dh, z:zoom, fit };
   }
+
   function applyTransform(){
     const i=renderInfo(); if(!i||!imgNatural) return;
     img.style.width=(imgNatural.w*i.fit)+'px';
@@ -103,6 +106,7 @@
     zoomInBtn.disabled=busy||i.z>=ZOOM_MAX;
     zoomOutBtn.disabled=busy||i.z<=ZOOM_MIN;
   }
+
   function clampPan(){
     const i=renderInfo(); if(!i) return;
     const vw=viewport.clientWidth, vh=viewport.clientHeight;
@@ -113,7 +117,9 @@
     pan.y = i.dispH<=vh ? 0 : Math.max(cy, Math.min(-cy, pan.y));
     applyTransform();
   }
+
   function centerView(){ pan={x:0,y:0}; zoom=1; applyTransform(); }
+
   function zoomAt(cx,cy,d){
     const i=renderInfo(); if(!i) return;
     const oldZ=i.z; let nz=Math.max(ZOOM_MIN,Math.min(ZOOM_MAX,oldZ*d));
@@ -122,6 +128,7 @@
     pan.x=(cx-viewport.clientWidth/2)-px*nz; pan.y=(cy-viewport.clientHeight/2)-py*nz;
     zoom=nz; clampPan(); if(manual) updateCursor();
   }
+
   function imgPixelFromClient(cx,cy){
     const i=renderInfo(); if(!i||!imgNatural) return null;
     const vr=viewport.getBoundingClientRect();
@@ -136,6 +143,7 @@
       cursor = imgNatural ? { x: Math.floor(imgNatural.w/2), y: Math.floor(imgNatural.h/2) } : null;
     }
   }
+
   function updateCursor(){
     if(!manual || !cursor || !imgNatural || img.style.display==='none'){ vcursor.classList.remove('on'); return; }
     const i=renderInfo(); if(!i) return;
@@ -144,6 +152,7 @@
     vcursor.classList.add('on');
     clickBtn.disabled = busy;
   }
+
   function moveCursorTo(x,y){
     if(!imgNatural) return;
     cursor.x=Math.max(0,Math.min(imgNatural.w-1,Math.round(x)));
@@ -163,6 +172,7 @@
     };
     img.src=src;
   }
+
   function showImage(b64){ if(!b64) return; setFrame('data:image/png;base64,'+b64); }
 
   // ===== 实时画面 (WebSocket /api/live) =====
@@ -171,14 +181,19 @@
   let liveArr=[], liveLastArrival=0, liveStatT=0, lastLiveErrT=0, lastOpT=0;
 
   const liveBadge=$('liveBadge');
+
   function liveSend(o){ if(liveWs&&liveWs.readyState===1) liveWs.send(JSON.stringify(o)); }
+
   function liveActive(){ return !!liveWs && liveWs.readyState===1; }
+
   function liveBadgeUi(){
     if(!liveWs){ liveBadge.style.display='none'; return; }
     liveBadge.style.display='flex';
     for(let i=0;i<3;i++) liveBadge.children[i].className = i<=liveGearIdx ? 'on' : '';
   }
+
   function liveSetGear(i){ liveGearIdx=i; liveBadgeUi(); }
+
   function liveConnect(){
     const proto=location.protocol==='https:'?'wss':'ws';
     liveWs=new WebSocket(proto+'://'+location.host+'/api/live');
@@ -208,11 +223,13 @@
     };
     liveWs.onerror=()=>{ try{ liveWs.close(); }catch{} };
   }
+
   function liveStop(){
     try{ liveWs && liveWs.close(); }catch{}
     liveWs=null; liveBadgeUi();
     if(liveLastUrl){ URL.revokeObjectURL(liveLastUrl); liveLastUrl=null; }
   }
+
   // 每 5 秒上报帧到达间隔样本; 档位决策在服务端(只有它知道实际调度节奏与空闲状态), 客户端只显示
   function liveAutoStats(){
     const nowt=Date.now();
@@ -225,11 +242,14 @@
     }
     liveArr=[];
   }
+
   document.addEventListener('visibilitychange',()=>{
     if(document.hidden){ if(liveWs) liveStop(); }
     else if(!liveWs){ liveConnect(); }
   });
+
   window.addEventListener('pagehide',()=>{ try{ liveWs && liveWs.close(); }catch{} });
+
   function doShot(){
     if(liveActive()){ liveSend({op:'refresh'}); return; }   // 实时模式下刷新=触发一次突发, 无需重截
     setBusy(true);
@@ -250,13 +270,16 @@
       .catch(()=>{ toast('请求失败'); setReady(false); })
       .finally(()=>setBusy(false));
   }
+
   function rippleAt(sx,sy){
     const i=renderInfo(); if(!i) return;
     ripple.style.left=(i.left+sx*i.fit*i.z)+'px';
     ripple.style.top=(i.top+sy*i.fit*i.z)+'px';
     ripple.classList.remove('go'); void ripple.offsetWidth; ripple.classList.add('go');
   }
+
   let clickInflight=false;
+
   function doClick(x,y){
     if(clickInflight) return;   // 轻量防抖: 实时模式下无蒙层阻挡, 避免误触连发
     const la=liveActive();
@@ -277,6 +300,7 @@
   // 直接模式: 单指轻点=点击, 单指拖动=平移, 双指捏合=缩放(双指整体移动=平移)
   // 手动模式: 单指拖动=移动光标(1:1), 双指捏合=缩放, 底部按钮=确认点击
   let gesture=null;
+
   viewport.addEventListener('touchstart',(e)=>{
     if(busy) return;
     if(e.touches.length===2){
@@ -288,6 +312,7 @@
       gesture={type: manual?'move':'tap', sx:e.touches[0].clientX, sy:e.touches[0].clientY, moved:false};
     }
   },{passive:false});
+
   viewport.addEventListener('touchmove',(e)=>{
     if(!gesture) return;
     if(gesture.type==='pinch' && e.touches.length===2){
@@ -328,6 +353,7 @@
       gesture.moved=gesture.panning;
     }
   },{passive:false});
+
   viewport.addEventListener('touchend',(e)=>{
     if(!gesture) return;
     if(gesture.type==='pinch' && e.touches.length<2){ clampPan(); gesture=null; return; }
@@ -339,6 +365,7 @@
     if(gesture.type==='tap' && e.touches.length===0 && gesture.moved) clampPan();   // 拖动平移后收拢边界
     if(e.touches.length===0) gesture=null;
   });
+
   viewport.addEventListener('touchcancel',()=>{ gesture=null; });
 
   // ===== 桌面 =====
@@ -376,6 +403,7 @@
 
   // ===== 文本输入 =====
   const MAX_TEXT = 2000;
+
   function openInput(){
     if(!imgNatural || img.style.display==='none'){ toast('画面不可用，请先刷新'); return; }
     if(!target){ toast('请先点击画面选中目标输入框'); return; }
@@ -384,7 +412,9 @@
     adjustInputPanel();
     setTimeout(()=>inputArea.focus({preventScroll:true}), 90);
   }
+
   function closeInput(){ inputModal.classList.remove('show'); }
+
   function sendInput(){
     const text=inputArea.value.trim();
     if(!text){ toast('请输入要发送的文本'); inputArea.focus(); return; }
@@ -405,8 +435,8 @@
       .catch(()=>{ toast('请求失败'); })
       .finally(()=>{ inputSend.disabled=false; inputSend.textContent='发送'; if(!la) setBusy(false); });
   }
-  inputBtn.addEventListener('click', openInput);
 
+  inputBtn.addEventListener('click', openInput);
   inputClose.addEventListener('click', closeInput);
   inputCancel.addEventListener('click', closeInput);
   inputSend.addEventListener('click', sendInput);
@@ -415,18 +445,23 @@
   inputArea.addEventListener('keydown',(e)=>{
     if(e.key==='Enter' && !e.shiftKey && !e.isComposing){ e.preventDefault(); sendInput(); }
   });
+
   // 键盘弹出时把面板顶到键盘上方(visualViewport 适配, iOS 键盘覆盖 fixed 底部)
   const vv = window.visualViewport;
+
   function adjustInputPanel(){
     if(!vv || !inputModal.classList.contains('show')) return;
     const kb = window.innerHeight - vv.offsetTop - vv.height;
     inputCard.style.marginBottom = (kb>0 ? kb : 0)+'px';
   }
+
   if(vv){ vv.addEventListener('resize', adjustInputPanel); vv.addEventListener('scroll', adjustInputPanel); }
+
   window.addEventListener('resize', adjustInputPanel);
 
   // ===== 帮助 =====
   const openHelp=()=>helpModal.classList.add('show'), closeHelp=()=>helpModal.classList.remove('show');
+
   helpBtn.addEventListener('click',openHelp);
   helpClose.addEventListener('click',closeHelp);
   helpModal.addEventListener('click',(e)=>{ if(e.target===helpModal) closeHelp(); });
@@ -434,6 +469,7 @@
   // ===== 花妖版本更新 =====
   const VERSION_RE = /^\d+\.\d+\.\d+$/;
   let updating = false;
+
   function openUpdate(){
     updateModal.classList.add('show');
     updateSteps.textContent = '';
@@ -468,16 +504,20 @@
       })
       .catch(() => { updateInfo.textContent = '获取版本信息失败'; });
   }
+
   function nextVersionStr(v){
     const m = String(v || '').match(/^(\d+)\.(\d+)\.(\d+)$/);
     return m ? (m[1] + '.' + m[2] + '.' + (Number(m[3]) + 1)) : (v || '');
   }
+
   function closeUpdate(){ updateModal.classList.remove('show'); }
+
   function setUpdating(b){
     updating = b;
     updateGo.disabled = b; updateAuto.disabled = b;
     updateVersion.disabled = b;
   }
+
   function doUpdate(body){
     if (updating) return;
     setUpdating(true);
@@ -508,6 +548,7 @@
   setupGoBtn.addEventListener('click', openUpdate);   // 未安装引导卡 -> 安装面板
   updateClose.addEventListener('click', closeUpdate);
   updateModal.addEventListener('click', (e) => { if (e.target === updateModal) closeUpdate(); });
+
   // ===== 通用确认弹窗 =====
   function confirmDialog(opts){
     opts = opts || {};
@@ -519,7 +560,9 @@
     confirmModal._onOk = typeof opts.onOk === 'function' ? opts.onOk : null;
     confirmModal.classList.add('show');
   }
+
   function closeConfirm(){ confirmModal.classList.remove('show'); }
+
   confirmOk.addEventListener('click', () => { const cb = confirmModal._onOk; closeConfirm(); if (cb) cb(); });
   confirmCancel.addEventListener('click', closeConfirm);
   confirmClose.addEventListener('click', closeConfirm);
@@ -527,6 +570,7 @@
 
   // ===== 重启花妖 =====
   let restarting = false;
+
   function doRestart(){
     if (restarting || busy) return;
     restarting = true; setBusy(true);
@@ -543,6 +587,7 @@
       .catch(() => { setBusy(false); toast('请求失败'); })
       .finally(() => { restarting = false; });
   }
+
   restartBtn.addEventListener('click', () => {
     confirmDialog({
       title: '重启花妖',
@@ -562,7 +607,10 @@
 
   // ===== 初始化 =====
   applyMode();
+
   inputBtn.disabled = true;   // 无画面时不可输入
+
   doShot();
+
   window.addEventListener('resize', applyTransform);
   document.addEventListener('keydown',(e)=>{ if(e.key==='Escape'){ helpModal.classList.remove('show'); closeInput(); closeConfirm(); } });
