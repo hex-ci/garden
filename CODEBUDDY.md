@@ -36,7 +36,7 @@
 
 ### server.js —— HTTP 服务与花妖生命周期
 
-- `POST /api/control/shot`：确保花妖在运行（`ensureGardenRunning`：当前版本 exe 路径精确匹配，异常时重启；未安装返回 `notInstalled` 供前端安装引导）→ 抓帧落盘 `screenshots/control.png` → 返回窗口矩形。
+- `POST /api/control/shot`：确保花妖在运行（`ensureGardenRunning`：当前版本 exe 路径精确匹配，异常时重启；未安装返回 `notInstalled` 供前端安装引导）→ **内存抓帧不落盘** → 返回窗口矩形 + base64 PNG（`image` 字段，前端直接 `img.src='data:image/png;base64,'` 渲染，省一次 GET 往返）。`GET /api/control/screenshot` 返回最近一帧内存 PNG（`image/png`），便于浏览器直接打开调试。
 - `POST /api/control/click`：`{x,y}`（截图像素坐标）→ `clientClick` → 250ms 后自动重截图，形成"所见即所得"闭环。窗口移动不影响映射（每次实时求原点）。
 - `POST /api/control/input`：`{x,y,text,clear}` → **先跑安全闸**（`uia-probe`，不可编辑则拒绝且一个消息都不发）→ `sendTextInput` → 重截图反馈。
 - `POST /api/control/restart` / `GET|POST /api/garden/update`：重启与版本更新（下载 zip → yauzl 校验解压 → `netsh advfirewall` 预放行防火墙 → 拉起 → 写 `hua-yao/version.json`；启动失败回滚旧版）。
@@ -49,5 +49,6 @@
 ## 关键约束
 
 - 花妖窗口标题固定 `"花妖"`（客户端区约 390x844）；`hua-yao/` 为安装目录（gitignored）。
-- `.codebuddy/`、`logs/`、`screenshots/`、`.env`、`hua-yao/` 均已 gitignore；**绝不提交任何真实下载源/凭证/运行时截图**。
+- 截图**不落盘**：抓帧在内存中完成，base64 随 API 响应直出；`screenshots/` 目录不再创建（gitignore 条目仅作历史遗留兼容）。
+- `.codebuddy/`、`logs/`、`.env`、`hua-yao/` 均已 gitignore；**绝不提交任何真实下载源/凭证**。
 - 依赖保持最小集（koffi/node-screenshots/yauzl），新增能力优先考虑"系统能力 + 消息机制"，引入新 npm 依赖或任何需要编译的东西前必须与用户确认。

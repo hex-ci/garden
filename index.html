@@ -534,8 +534,8 @@
     updateCursor(); updateMeta();
   }
 
-  function showImage(mt){
-    if(!mt) return; const t=++tok;
+  function showImage(b64){
+    if(!b64) return; const t=++tok;
     img.onload=()=>{
       if(t!==tok) return;
       imgNatural={w:img.naturalWidth,h:img.naturalHeight};
@@ -543,7 +543,7 @@
       inputBtn.disabled=false;
       applyTransform(); if(manual) updateCursor();
     };
-    img.src='/api/control/screenshot?t='+mt+'&r='+Math.random();
+    img.src='data:image/png;base64,'+b64;
   }
   function updateMeta(){
     meta.innerHTML = rect ? '窗口 <b>'+rect.w+'×'+rect.h+'</b>'+(cursor?' · 光标 <b>('+cursor.x+','+cursor.y+')</b>':'') : '';
@@ -561,7 +561,7 @@
           if(!rect) showEmpty(d.message||'截图失败');
           toast(d.message||'截图失败'); setReady(false); return;
         }
-        rect=d.rect; updateMeta(); setReady(true); if(d.screenshot) showImage(d.screenshot.mtimeMs);
+        rect=d.rect; updateMeta(); setReady(true); if(d.image) showImage(d.image);
       })
       .catch(()=>{ toast('请求失败'); setReady(false); })
       .finally(()=>setBusy(false));
@@ -577,7 +577,7 @@
     target={x,y};   // 记住目标输入框位置(文本输入时先重定位到此处确保焦点)
     fetch('/api/control/click',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({x,y}),cache:'no-store'})
       .then(r=>r.json().catch(()=>({})))
-      .then(d=>{ if(!d.ok){ toast(d.message||'点击失败'); return; } rect=d.rect; updateMeta(); if(d.screenshot) showImage(d.screenshot.mtimeMs); })
+      .then(d=>{ if(!d.ok){ toast(d.message||'点击失败'); return; } rect=d.rect; updateMeta(); if(d.image) showImage(d.image); })
       .catch(()=>{ toast('请求失败'); })
       .finally(()=>setBusy(false));
   }
@@ -707,7 +707,7 @@
       .then(d=>{
         if(!d.ok){ toast(d.message||'输入失败'); return; }
         rect=d.rect; updateMeta();
-        if(d.screenshot) showImage(d.screenshot.mtimeMs);
+        if(d.image) showImage(d.image);
         closeInput(); toast('文本已发送'+(clear?'(已清空)':''));
       })
       .catch(()=>{ toast('请求失败'); })

@@ -30,7 +30,6 @@ loadEnvFile();
 
 const HOST = process.env.HOST || '0.0.0.0';
 const PORT = Number(process.env.PORT) || 13000;
-const SCREENSHOTS_DIR = path.join(ROOT, 'screenshots');
 // 控制操作日志: 记录每次点击/输入/截图请求与结果, 供远程调试真实用户操作
 // .env 可配 CONTROL_LOG=0 进入静默模式(仅记录失败与安全闸拦截), 默认 1=全量记录
 const CONTROL_LOG = path.join(ROOT, 'logs', 'control.log');
@@ -67,19 +66,16 @@ const GARDEN_LOG_FILE = path.join(GARDEN_INSTALL_DIR, 'update.log');
 const GARDEN_PROC_PREFIX = GARDEN_EXE_NAME.split('{v}')[0].toLowerCase();
 
 // ---- 远程操控模式: 窗口抓帧 + 消息点击 + 消息文本输入（原生模块, 见 capture.js）----
-const CONTROL_IMG = path.join(SCREENSHOTS_DIR, 'control.png');
 
-if (!fs.existsSync(SCREENSHOTS_DIR)) fs.mkdirSync(SCREENSHOTS_DIR, { recursive: true });
-
-// 抓帧并落盘 control.png, 返回 { rect: {x,y,w,h}, mtimeMs, size }
-async function captureToDisk() {
+// 抓帧到内存(不落盘), 返回 { rect: {x,y,w,h}, png: Buffer };
+// 最近一帧保留在 lastShotPng, 供 GET /api/control/screenshot 直接查看
+let lastShotPng = null;
+async function captureShot() {
   const frame = await capture.captureFrame();
-  fs.writeFileSync(CONTROL_IMG, frame.png);
-  const mtimeMs = fs.statSync(CONTROL_IMG).mtimeMs;
+  lastShotPng = frame.png;
   return {
     rect: { x: frame.origin.x, y: frame.origin.y, w: frame.width, h: frame.height },
-    mtimeMs,
-    size: frame.png.length,
+    png: frame.png,
   };
 }
 
@@ -549,11 +545,12 @@ const server = http.createServer(async (req, res) => {
 
   // ---- 远程操控模式(主功能) ----
   if (req.method === 'GET' && url === '/api/control/screenshot') {
-    if (!fs.existsSync(CONTROL_IMG)) {
+    if (!lastShotPng) {
       res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
       return res.end(JSON.stringify({ error: 'no control screenshot', message: '暂无截图' }));
     }
-    return serveFile(res, CONTROL_IMG, 'image/png');
+    res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-store' });
+    return res.end(lastShotPng);
   }
 
   if (req.method === 'POST' && url === '/api/control/shot') {
@@ -576,14 +573,14 @@ const server = http.createServer(async (req, res) => {
     }
     try {
       const ts0 = Date.now();
-      const cap = await captureToDisk();
+      const cap = await captureShot();
       logControl(`shot ok capMs=${Date.now() - ts0} rect=${cap.rect.x},${cap.rect.y} ${cap.rect.w}x${cap.rect.h}`);
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
       return res.end(JSON.stringify({
         ok: true,
         message: '画面已刷新',
         rect: cap.rect,
-        screenshot: { mtimeMs: cap.mtimeMs },
+        image: cap.png.toString('base64'),
         ...(ensured.started ? { autoStarted: true } : {}),
         ...(ensured.error ? { ensureError: ensured.error } : {}),
       }));
@@ -643,14 +640,14 @@ const server = http.createServer(async (req, res) => {
       const t0 = Date.now();
       capture.clientClick(x, y);
       await sleep(150);
-      const cap = await captureToDisk();
+      const cap = await captureShot();
       logControl(`click(${x},${y}) ok total=${Date.now() - t0}ms`);
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
       return res.end(JSON.stringify({
         ok: true,
         message: '已点击 (' + x + ',' + y + ')',
         rect: cap.rect,
-        screenshot: { mtimeMs: cap.mtimeMs },
+        image: cap.png.toString('base64'),
       }));
     } catch (e) {
       logControl(`click(${x},${y}) FAIL ${e.message}`);
@@ -696,14 +693,14 @@ const server = http.createServer(async (req, res) => {
       await capture.sendTextInput(x, y, body.text, !clear);
       await sleep(250);   // 让渲染器消化输入后再抓帧反馈
       const t1 = Date.now();
-      const cap = await captureToDisk();
+      const cap = await captureShot();
       logControl(`input(${x},${y}) clear=${clear} ok msg total=${Date.now() - t0}ms capMs=${Date.now() - t1}`);
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
       return res.end(JSON.stringify({
         ok: true,
         message: '文本已发送' + (clear ? '(已清空)' : ''),
         rect: cap.rect,
-        screenshot: { mtimeMs: cap.mtimeMs },
+        image: cap.png.toString('base64'),
       }));
     } catch (e) {
       logControl(`input(${x},${y}) FAIL ${e.message}`);
