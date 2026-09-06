@@ -40,3 +40,4 @@ Desktop.ini
 *.orig
 
 package-lock.json
+.playwright-cli/
