@@ -1,7 +1,7 @@
 // UIA 只读探测 (PowerShell 路线): 判断屏幕坐标处是否为花妖的可输入控件。
 // 只做只读 UIA 查询, 不发送任何窗口消息, 对界面零扰动。
 // 通过 EncodedCommand 投递 (UTF-16LE), 不落盘, 无编码坑, 零外部依赖 (系统自带 PowerShell + .NET UIA)。
-const { spawn } = require('child_process');
+import { spawn } from 'node:child_process';
 
 // 生成探测脚本 (PowerShell 源码), pid 为花妖进程号, px/py 为屏幕物理坐标
 function buildProbeScript(pid, px, py) {
@@ -108,4 +108,7 @@ function runUiaProbe(pid, px, py) {
   });
 }
 
-module.exports = { buildProbeScript, runUiaProbe };
+export { 
+  buildProbeScript,
+  runUiaProbe,
+};

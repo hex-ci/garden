@@ -1,11 +1,14 @@
-'use strict';
-
 // 花妖操控台启动器
 // 在 Windows 下检测是否已具备管理员权限：若没有，弹 UAC 提权后以管理员身份重新启动。
 // 原因：更新花妖时需要写入防火墙放行规则(netsh advfirewall)，否则新版花妖首次启动
 // 会弹出 Windows"允许联网"对话框，干扰操控台的正常逻辑。
 
-const { spawn, spawnSync } = require('child_process');
+import { spawn, spawnSync } from 'node:child_process';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 function isElevated() {
   try {
@@ -22,7 +25,7 @@ function q(s) {
 
 if (isElevated() || process.platform !== 'win32') {
   // 已是管理员(或非 Windows 无 UAC 概念)：直接加载服务
-  require('./server.js');
+  await import('./server.js');
 } else {
   console.log('正在请求管理员权限（用于写入防火墙放行规则）…');
   const ps = spawn('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',

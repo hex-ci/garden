@@ -1,15 +1,15 @@
-'use strict';
 // 花妖窗口原生交互模块：抓帧（node-screenshots）+ 消息点击（koffi PostMessage）
 // 背景：RDP 最小化/窗口遮挡时，屏幕级截图与真实鼠标注入均不可用。
 //   抓帧走窗口级捕获（XCap 内部 PrintWindow 语义，已实测最小化/遮挡均可用）；
 //   点击走投递到 WebView2 渲染子窗口（Chrome_RenderWidgetHostHWND）的消息点击（已实测后台可送达）。
 // 坐标系：截图像素坐标 = 花妖窗口客户区坐标（截取的就是客户区，无标题栏）。
 
-const koffi = require('koffi');
-const { Window } = require('node-screenshots');
+import koffi from 'koffi';
+import nodeScreenshots from 'node-screenshots';
+
+const { Window } = nodeScreenshots;
 
 const user32 = koffi.load('user32.dll');
-const gdi32 = koffi.load('gdi32.dll');
 
 const PostMessageW = user32.func('int PostMessageW(intptr hwnd, uint msg, uintptr wp, uintptr lp)');
 const ClientToScreen = user32.func('bool ClientToScreen(intptr hwnd, void *pt)');
@@ -20,7 +20,6 @@ const IsIconic = user32.func('bool IsIconic(intptr hwnd)');
 const GetWindowThreadProcessId = user32.func('uint GetWindowThreadProcessId(intptr hwnd, void *pid)');
 const GetWindow = user32.func('intptr GetWindow(intptr hwnd, uint cmd)');
 const GetClassNameW = user32.func('int GetClassNameW(intptr hwnd, void *buf, int max)');
-const GetClientRect = user32.func('bool GetClientRect(intptr hwnd, void *rect)');
 
 const GW_CHILD = 5, GW_HWNDNEXT = 2;
 const SW_SHOWNOACTIVATE = 4;   // 恢复/显示窗口但不抢前台
@@ -211,4 +210,13 @@ function sendTextInput(sx, sy, text, append) {
   return true;
 }
 
-module.exports = { captureFrame, clientClick, clientOrigin, sendTextInput, findRenderWidgetHwnd, getTargetPid, invalidate, getWindow };
+export { 
+  captureFrame,
+  clientClick,
+  clientOrigin, 
+  sendTextInput, 
+  findRenderWidgetHwnd, 
+  getTargetPid, 
+  invalidate, 
+  getWindow,
+};

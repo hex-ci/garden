@@ -1,14 +1,14 @@
-'use strict';
+import http from 'node:http';
+import https from 'node:https';
+import fs from 'node:fs';
+import path from 'node:path';
+import { spawn, spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import yauzl from 'yauzl'; // 纯 Node ZIP 解压, 不依赖系统 tar/powershell
+import * as capture from './capture.js';
+import { runUiaProbe } from './uia-probe.js';
 
-const http = require('http');
-const https = require('https');
-const fs = require('fs');
-const path = require('path');
-const { spawn, spawnSync } = require('child_process');
-const yauzl = require('yauzl'); // 纯 Node ZIP 解压, 不依赖系统 tar/powershell
-const capture = require('./capture');
-
-const ROOT = __dirname;
+const ROOT = path.dirname(fileURLToPath(import.meta.url));
 
 // ---- 本地环境配置加载(零依赖 .env 解析) ----
 // 优先级: 系统环境变量 > .env 文件 > 代码内默认值。.env 已被 .gitignore 排除, 不随仓库分发。
@@ -48,7 +48,6 @@ function logControl(msg) {
 // ---- UIA 只读探测: 判断屏幕坐标处是否为可输入框 (发送前安全闸, 防止消息误伤界面) ----
 // UIA 只读探测走 PowerShell 路线 (uia-probe.js): 系统自带 PS + .NET UIA, EncodedCommand 投递,
 // 零编译/零外部依赖。只读不写, 探测失败/超时 => 放行(可用性优先)。
-const { runUiaProbe } = require('./uia-probe');
 const INDEX_FILE = path.join(ROOT, 'index.html');
 
 // ---- 花妖程序更新(可配置, 地址可能随 CDN 变动而改) ----
@@ -759,5 +758,6 @@ function shutdown() {
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 1000);
 }
+
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);

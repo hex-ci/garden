@@ -4,7 +4,7 @@
 
 这是"花妖"(HuaYao)游戏**远程操控台**：通过浏览器实时查看"花妖"桌面程序（Tauri + WebView2）的画面，单击画面即可在花妖窗口对应位置执行点击，还支持向输入框发送文本。核心特性是**全后台操控**——RDP 最小化、窗口被完全遮挡、花妖在后台时，截图/点击/输入均正常工作。
 
-技术栈：Node.js 原生 `http` 后端 + 单文件 HTML5 前端。运行时依赖仅 3 个且全部预编译：`koffi`（Win32 API 调用）、`node-screenshots`（窗口截图）、`yauzl`（纯 Node ZIP 解压，用于花妖更新）。UIA 能力一律通过**系统自带 PowerShell + .NET UIA** 实现，**禁止引入任何编译型/原生依赖**（项目原则：简洁优先，用户明确裁定）。
+技术栈：Node.js 原生 `http` 后端 + 单文件 HTML5 前端，**全 ESM**（package.json `"type": "module"`，相对导入必须带 `.js` 扩展名；CJS 依赖用默认导入解构）。运行时依赖仅 3 个且全部预编译：`koffi`（Win32 API 调用）、`node-screenshots`（窗口截图）、`yauzl`（纯 Node ZIP 解压，用于花妖更新）。UIA 能力一律通过**系统自带 PowerShell + .NET UIA** 实现，**禁止引入任何编译型/原生依赖**（项目原则：简洁优先，用户明确裁定）。
 
 ## 常用命令
 
