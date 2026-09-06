@@ -75,9 +75,10 @@ function findRenderWidgetHwnd(hwnd, depth = 0) {
   return 0;
 }
 
-// 查找并缓存花妖窗口（标题匹配；PID 用于缓存有效性校验，花妖重启后自动失效重建）
+// 查找并缓存花妖窗口（标题精确匹配"花妖"；模糊包含会误抓标题含"花妖"的浏览器窗口,
+// 例如操控台页面标题"花妖 · 操控台 - Microsoft Edge"。PID 用于缓存有效性校验, 花妖重启后自动失效重建）
 function findWindow() {
-  const win = Window.all().find((w) => (w.title() || '').includes(TITLE_KEY));
+  const win = Window.all().find((w) => (w.title() || '') === TITLE_KEY);
   if (!win) return null;
   const hwnd = Number(win.id());
   const pid = Number(win.pid()) || pidOf(hwnd);
@@ -112,9 +113,9 @@ function clientOrigin(hwnd) {
   return { x: pt.readInt32LE(0), y: pt.readInt32LE(4) };
 }
 
-// 抓帧：返回 { png: Buffer, width, height, origin: {x,y}, hwnd }
+// 抓取原始图像(不编码): 返回 { img, width, height, origin, hwnd }, 编码方式由调用方选择
 // 带超时+重试+窗口对象自愈（应对 RDP 会话切换瞬间死锁、花妖重启后 HWND 变化）
-async function captureFrame() {
+async function captureImage() {
   let lastErr = null;
   for (let attempt = 1; attempt <= CAPTURE_ATTEMPTS; attempt++) {
     try {
@@ -122,11 +123,8 @@ async function captureFrame() {
       if (!w) throw new Error('未找到花妖窗口');
       ensureVisible(w.hwnd);
       const img = await withTimeout(w.win.captureImage(), CAPTURE_TIMEOUT, '抓帧');
-      const png = await withTimeout(img.toPng(), CAPTURE_TIMEOUT, '编码');
-      const buf = Buffer.isBuffer(png) ? png : Buffer.from(png.buffer ?? png);
-      if (buf.length < 1000) throw new Error('截图像素数据异常');
-      const origin = clientOrigin(w.hwnd);
-      return { png: buf, width: img.width, height: img.height, origin, hwnd: w.hwnd };
+      if (!img || img.width < 10) throw new Error('截图像素数据异常');
+      return { img, width: img.width, height: img.height, origin: clientOrigin(w.hwnd), hwnd: w.hwnd };
     } catch (e) {
       lastErr = e;
       cached = null;   // 下一轮重新查找窗口（应对花妖重启/HWND 变化）
@@ -134,6 +132,15 @@ async function captureFrame() {
     }
   }
   throw lastErr || new Error('截图失败');
+}
+
+// 抓帧编码为 PNG: 返回 { png: Buffer, width, height, origin: {x,y}, hwnd }
+async function captureFrame() {
+  const fr = await captureImage();
+  const png = await withTimeout(fr.img.toPng(), CAPTURE_TIMEOUT, '编码');
+  const buf = Buffer.isBuffer(png) ? png : Buffer.from(png.buffer ?? png);
+  if (buf.length < 1000) throw new Error('截图像素数据异常');
+  return { png: buf, width: fr.width, height: fr.height, origin: fr.origin, hwnd: fr.hwnd };
 }
 
 // 消息点击：sx/sy 为截图像素坐标（=客户区坐标）
@@ -212,6 +219,7 @@ function sendTextInput(sx, sy, text, append) {
 
 export {
   captureFrame,
+  captureImage,
   clientClick,
   clientOrigin,
   sendTextInput,

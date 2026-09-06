@@ -4,7 +4,7 @@
 
 这是"花妖"(HuaYao)游戏**远程操控台**：通过浏览器实时查看"花妖"桌面程序（Tauri + WebView2）的画面，单击画面即可在花妖窗口对应位置执行点击，还支持向输入框发送文本。核心特性是**全后台操控**——RDP 最小化、窗口被完全遮挡、花妖在后台时，截图/点击/输入均正常工作。
 
-技术栈：Node.js 原生 `http` 后端 + 单文件 HTML5 前端，**全 ESM**（package.json `"type": "module"`，相对导入必须带 `.js` 扩展名；CJS 依赖用默认导入解构）。运行时依赖仅 3 个且全部预编译：`koffi`（Win32 API 调用）、`node-screenshots`（窗口截图）、`yauzl`（纯 Node ZIP 解压，用于花妖更新）。UIA 能力一律通过**系统自带 PowerShell + .NET UIA** 实现，**禁止引入任何编译型/原生依赖**（项目原则：简洁优先，用户明确裁定）。
+技术栈：Node.js 原生 `http` 后端 + 单文件 HTML5 前端，**全 ESM**（package.json `"type": "module"`，相对导入必须带 `.js` 扩展名；CJS 依赖用默认导入解构）。运行时依赖仅 4 个且全为纯 JS/预编译：`koffi`（Win32 API 调用）、`node-screenshots`（窗口截图，含原生 `toJpeg()`/`crop()`）、`ws`（WebSocket，纯 JS）、`yauzl`（纯 Node ZIP 解压，用于花妖更新）。UIA 能力一律通过**系统自带 PowerShell + .NET UIA** 实现，**禁止引入任何编译型/原生依赖**（项目原则：简洁优先，用户明确裁定）。
 
 ## 常用命令
 
@@ -37,9 +37,10 @@
 ### server.js —— HTTP 服务与花妖生命周期
 
 - `POST /api/control/shot`：确保花妖在运行（`ensureGardenRunning`：当前版本 exe 路径精确匹配，异常时重启；未安装返回 `notInstalled` 供前端安装引导）→ **内存抓帧不落盘** → 返回窗口矩形 + base64 PNG（`image` 字段，前端直接 `img.src='data:image/png;base64,'` 渲染，省一次 GET 往返）。`GET /api/control/screenshot` 返回最近一帧内存 PNG（`image/png`），便于浏览器直接打开调试。
-- `POST /api/control/click`：`{x,y}`（截图像素坐标）→ `clientClick` → 250ms 后自动重截图，形成"所见即所得"闭环。窗口移动不影响映射（每次实时求原点）。
-- `POST /api/control/input`：`{x,y,text,clear}` → **先跑安全闸**（`uia-probe`，不可编辑则拒绝且一个消息都不发）→ `sendTextInput` → 重截图反馈。
+- `POST /api/control/click`：`{x,y,noimg?}`（截图像素坐标）→ `clientClick` + `noteActivity()`。**noimg=true（实时模式）时跳过等待与抓帧直接秒回**（实测 ~40ms），画面由实时突发帧呈现；否则等待+重截图返回 image，形成"所见即所得"闭环。窗口移动不影响映射（每次实时求原点）。
+- `POST /api/control/input`：`{x,y,text,clear,noimg?}` → **先跑安全闸**（`uia-probe`，不可编辑则拒绝且一个消息都不发；**同点位结果缓存 4s**，命中时省去 ~700ms PS 冷启动，实测后续探测 3ms）→ `sendTextInput`（内置 ~0.5-0.7s 消息节奏等待）+ `noteActivity()`；noimg 时无截图返回，前端发送按钮显示"发送中…"加载态；否则重截图反馈。
 - `POST /api/control/restart` / `GET|POST /api/garden/update`：重启与版本更新（下载 zip → yauzl 校验解压 → `netsh advfirewall` 预放行防火墙 → 拉起 → 写 `hua-yao/version.json`；启动失败回滚旧版）。
+- **`WS /api/live`（实时画面，live.js）**：**常开，前端无开关按钮**（实时是唯一画面模式）。轮询抓帧 + **变化才发帧**——原始 BGRA 隔点采样哈希（~1ms），画面没变只发 13 字节跳帧心跳，挂机静态画面近零流量。二进制帧格式 `[u8 flags][u32 seq][u32 ts][u16 w][u16 h] + JPEG`（flags&1=跳帧）；控制消息 JSON（start/gear/stop/refresh/stats ↔ gear/error）。三档轮询 eco 2s / mid 0.5s / fast 0.2s（**无档位按钮，档位决策完全在服务端**：客户端每 5s 上报帧到达间隔，服务端与**自己实际调度的间隔**比对——>2.5× 降一档（1 个周期即降），<1.3× 且非空闲 连续 2 周期升一档（迟滞防振荡），空闲 3 分钟地板期禁止升档。**为什么必须在服务端决策**：到达间隔由服务端调度节奏决定，客户端无法区分"空闲地板慢"与"网络慢"；且 stats 消息不得刷新 lastActivity，否则空闲地板永不生效——这两点曾导致"挂机升档+降不回来"的双 bug）。当前档位以信号条徽标浮动在画布右上角（1-3 格 = 省流/均衡/流畅，`pointer-events:none` 不挡操作）；**操作反馈帧主动推送**——`noteActivity()` 触发所有客户端 ~140ms（渲染器消化操作）后立即抓帧推送，实测点击→看到结果稳定 174ms（旧轮询机制为 15~215ms 随机）；REST 点击/输入成功调 `noteActivity()` 触发全客户端 2s 突发（200ms），WS 的 `refresh` op 等价；空闲 3 分钟（`LIVE_IDLE_MS` 可配）把轮询抬到省流档**并强制降档为 eco 通知客户端**（徽标同步 1 格；此前只抬间隔不改档位，导致徽标停在满格——自适应基准被地板抬高后降档分支永不触发），交互后由自适应自动爬升；客户端积压 >512KB 暂缓发帧（背压）。**实时是唯一模式**（常开无任何控件；首帧就绪后自动连接，断线自动重连）：WS 连接期间点击/输入带 `noimg:true` 秒回、无加载蒙层，涟漪+突发帧承担反馈；WS 断开期间自动回退旧的"等图+蒙层"路径。刷新按钮已移除——`doShot` 仅用于首次加载与重启/更新后的程序化刷新（实时连接中会转为 refresh 突发）。前端用 `URL.createObjectURL(blob)` 渲染，复用现有缩放/点击映射。JPEG 编码用 node-screenshots 原生 `toJpeg()`（q 固定 ~75，实测 51KB/帧、5-9ms），不引图像处理依赖。
 - 操作日志 `logControl()` → `logs/control.log`；配置项见 `.env.example`（`GARDEN_DOWNLOAD_URL` 无默认值，真实下载源属敏感信息不入库）。
 
 ### index.html —— 前端（单文件内联）

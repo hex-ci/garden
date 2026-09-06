@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import yauzl from 'yauzl'; // 纯 Node ZIP 解压, 不依赖系统 tar/powershell
 import * as capture from './capture.js';
 import { runUiaProbe } from './uia-probe.js';
+import { initLive, noteActivity } from './live.js';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 
@@ -69,6 +70,9 @@ const GARDEN_PROC_PREFIX = GARDEN_EXE_NAME.split('{v}')[0].toLowerCase();
 // 抓帧到内存(不落盘), 返回 { rect: {x,y,w,h}, png: Buffer };
 // 最近一帧保留在 lastShotPng, 供 GET /api/control/screenshot 直接查看
 let lastShotPng = null;
+// UIA 探测结果短时缓存: 同一窗口同一点位 4 秒内直接复用, 省去每次 ~700ms 的 PowerShell 冷启动
+// (输入文本常对同一输入框连续操作, 缓存命中时输入延迟减半; TTL 足够短, 界面变化导致误判的风险可忽略)
+let probeCache = { key: '', at: 0, result: null };
 async function captureShot() {
   const frame = await capture.captureFrame();
   lastShotPng = frame.png;
@@ -637,9 +641,15 @@ const server = http.createServer(async (req, res) => {
       return res.end(JSON.stringify({ ok: false, error: 'invalid coords', message: '坐标参数无效' }));
     }
     try {
-      // 消息点击(后台可送达), 稍候让界面响应后抓帧反馈
+      // 消息点击(后台可送达)。实时模式(noimg)下跳过等待与抓帧: 秒回确认, 画面由实时突发帧呈现
       const t0 = Date.now();
       capture.clientClick(x, y);
+      noteActivity();   // 实时画面短时突发提速
+      if (body.noimg === true) {
+        logControl(`click(${x},${y}) ok noimg total=${Date.now() - t0}ms`);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+        return res.end(JSON.stringify({ ok: true, message: '已点击 (' + x + ',' + y + ')' }));
+      }
       await sleep(150);
       const cap = await captureShot();
       logControl(`click(${x},${y}) ok total=${Date.now() - t0}ms`);
@@ -682,7 +692,15 @@ const server = http.createServer(async (req, res) => {
       if (!w) throw new Error('未找到花妖窗口');
       const origin = capture.clientOrigin(w.hwnd);
       const pid = capture.getTargetPid();
-      const probe = await runUiaProbe(pid, origin.x + x, origin.y + y);
+      const ck = pid + ':' + (origin.x + x) + ':' + (origin.y + y);
+      const nowMs = Date.now();
+      let probe;
+      if (probeCache.result && probeCache.key === ck && nowMs - probeCache.at < 4000) {
+        probe = probeCache.result;
+      } else {
+        probe = await runUiaProbe(pid, origin.x + x, origin.y + y);
+        probeCache = { key: ck, at: nowMs, result: probe };
+      }
       if (probe.unavailable) {
         logControl(`input(${x},${y}) probe unavailable: ${probe.error || 'unknown'} (fail-open)`);
       } else if (!probe.editable) {
@@ -692,6 +710,12 @@ const server = http.createServer(async (req, res) => {
       }
       // 纯消息文本输入(点击+END/三击全选+WM_CHAR), 后台可送达, 不抢系统焦点
       await capture.sendTextInput(x, y, body.text, !clear);
+      noteActivity();   // 实时画面短时突发提速
+      if (body.noimg === true) {
+        logControl(`input(${x},${y}) clear=${clear} ok noimg total=${Date.now() - t0}ms`);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+        return res.end(JSON.stringify({ ok: true, message: '文本已发送' + (clear ? '(已清空)' : '') }));
+      }
       await sleep(250);   // 让渲染器消化输入后再抓帧反馈
       const t1 = Date.now();
       const cap = await captureShot();
@@ -755,6 +779,9 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, HOST, () => {
   console.log('花妖操控台已启动 ->  http://' + (HOST === '0.0.0.0' ? 'localhost' : HOST) + ':' + PORT);
 });
+
+// 实时画面 WebSocket(同端口, /api/live)
+initLive(server, { onLog: logControl });
 
 function shutdown() {
   server.close(() => process.exit(0));
