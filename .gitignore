@@ -8,15 +8,8 @@ config.local.*
 secrets.*
 credentials*
 
-# ===== 运行时数据(截图/坐标/输入文本, 可能包含个人或账号信息) =====
-screenshots/
-control-meta.json
-input-text.txt
-
-# ===== 花妖程序(下载解压的安装包, 不随仓库分发) =====
-hua-yao/
-.garden-dl-*.zip
-.garden-dl-*.tmp
+# ===== 本地运行时数据(花妖程序/日志, 不随仓库分发) =====
+data/
 
 # ===== 日志 =====
 logs/

@@ -4,13 +4,22 @@
 
 这是"花妖"(HuaYao)游戏**远程操控台**：通过浏览器实时查看"花妖"桌面程序（Tauri + WebView2）的画面，单击画面即可在花妖窗口对应位置执行点击，还支持向输入框发送文本。核心特性是**全后台操控**——RDP 最小化、窗口被完全遮挡、花妖在后台时，截图/点击/输入均正常工作。
 
-技术栈：Node.js 原生 `http` 后端 + 单文件 HTML5 前端，**全 ESM**（package.json `"type": "module"`，相对导入必须带 `.js` 扩展名；CJS 依赖用默认导入解构）。运行时依赖仅 4 个且全为纯 JS/预编译：`koffi`（Win32 API 调用）、`node-screenshots`（窗口截图，含原生 `toJpeg()`/`crop()`）、`ws`（WebSocket，纯 JS）、`yauzl`（纯 Node ZIP 解压，用于花妖更新）。UIA 能力一律通过**系统自带 PowerShell + .NET UIA** 实现，**禁止引入任何编译型/原生依赖**（项目原则：简洁优先，用户明确裁定）。
+技术栈：Node.js 原生 `http` 后端 + HTML5 前端（`public/` 下 index.html + css/style.css + js/app.js 三文件），**全 ESM**（package.json `"type": "module"`，相对导入必须带 `.js` 扩展名；CJS 依赖用默认导入解构）。运行时依赖仅 4 个且全为纯 JS/预编译：`koffi`（Win32 API 调用）、`node-screenshots`（窗口截图，含原生 `toJpeg()`/`crop()`）、`ws`（WebSocket，纯 JS）、`yauzl`（纯 Node ZIP 解压，用于花妖更新）。UIA 能力一律通过**系统自带 PowerShell + .NET UIA** 实现，**禁止引入任何编译型/原生依赖**（项目原则：简洁优先，用户明确裁定）。
+
+## 目录结构
+
+```
+server/   后端: server.js(HTTP+API) / capture.js(抓帧+消息交互) / live.js(WS 实时画面) / uia-probe.js(PS 探测) / start.js(UAC 提权入口)
+public/   前端: index.html(结构) / css/style.css(样式) / js/app.js(逻辑), 由 server 静态托管(/css/*, /js/*)
+data/     本地运行时数据(gitignored): garden/(花妖安装目录, 含 version.json) + logs/control.log
+docs/     文档图片
+```
 
 ## 常用命令
 
-- **启动服务**：`npm start`（等价 `node start.js`）。`start.js` 检测管理员权限，非管理员弹 UAC 提权重启（更新花妖写防火墙规则需要），然后加载 `server.js`。监听 `0.0.0.0:13000`，`.env` 可覆盖 `PORT`/`HOST`。首次部署 `npm install`。
-- **无测试、无 Lint、无构建步骤**。改代码后需重启 node 进程才生效。
-- **调试**：`logs/control.log`（已 gitignore）记录每次 click/input/shot 的坐标、耗时、结果与安全闸判定，是远程排查的第一入口；默认全量记录，`.env` 设 `CONTROL_LOG=0` 切静默模式（仅失败/拦截），超 1MB 自动滚动。调试协作模式：加日志 → 用户浏览器真实操作 → 读日志定位。
+- **启动服务**：`npm start`（等价 `node server/start.js`）。`start.js` 检测管理员权限，非管理员弹 UAC 提权重启（更新花妖写防火墙规则需要），然后加载 `server.js`。监听 `0.0.0.0:13000`，`.env` 可覆盖 `PORT`/`HOST`。首次部署 `npm install`。
+- **无测试、无构建步骤；有 Lint**：`npm run lint`（ESLint 9 + `eslint.config.js`，recommended 规则 + 浏览器/Node globals 合并 + 允许空 catch）。**每次改代码后必须跑 lint 并清零**，再重启 node 进程。
+- **调试**：`data/logs/control.log`（已 gitignore）记录每次 click/input/shot 的坐标、耗时、结果与安全闸判定，是远程排查的第一入口；默认全量记录，`.env` 设 `CONTROL_LOG=0` 切静默模式（仅失败/拦截），超 1MB 自动滚动。调试协作模式：加日志 → 用户浏览器真实操作 → 读日志定位。
 
 ## 架构
 
@@ -49,7 +58,7 @@
 
 ## 关键约束
 
-- 花妖窗口标题固定 `"花妖"`（客户端区约 390x844）；`hua-yao/` 为安装目录（gitignored）。
-- 截图**不落盘**：抓帧在内存中完成，base64 随 API 响应直出；`screenshots/` 目录不再创建（gitignore 条目仅作历史遗留兼容）。
-- `.codebuddy/`、`logs/`、`.env`、`hua-yao/` 均已 gitignore；**绝不提交任何真实下载源/凭证**。
-- 依赖保持最小集（koffi/node-screenshots/yauzl），新增能力优先考虑"系统能力 + 消息机制"，引入新 npm 依赖或任何需要编译的东西前必须与用户确认。
+- 花妖窗口标题固定 `"花妖"`（**精确相等匹配**，防止误抓标题含"花妖"的浏览器窗口；客户端区约 390x844）；花妖安装目录为 `data/garden/`（含 version.json, 其中记录各版本 exe 的绝对路径）。
+- 截图**不落盘**：抓帧在内存中完成，base64 随 API 响应直出，无 screenshots/ 目录。
+- `.codebuddy/`、`data/`、`.env` 均已 gitignore；**绝不提交任何真实下载源/凭证**。
+- 依赖保持最小集（koffi/node-screenshots/ws/yauzl），新增能力优先考虑"系统能力 + 消息机制"，引入新 npm 依赖或任何需要编译的东西前必须与用户确认。

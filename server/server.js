@@ -9,7 +9,8 @@ import * as capture from './capture.js';
 import { runUiaProbe } from './uia-probe.js';
 import { initLive, noteActivity } from './live.js';
 
-const ROOT = path.dirname(fileURLToPath(import.meta.url));
+// ROOT = 项目根目录(server/ 的上一级); .env / data/ / public/ 均相对它解析
+const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
 // ---- 本地环境配置加载(零依赖 .env 解析) ----
 // 优先级: 系统环境变量 > .env 文件 > 代码内默认值。.env 已被 .gitignore 排除, 不随仓库分发。
@@ -33,8 +34,9 @@ const HOST = process.env.HOST || '0.0.0.0';
 const PORT = Number(process.env.PORT) || 13000;
 // 控制操作日志: 记录每次点击/输入/截图请求与结果, 供远程调试真实用户操作
 // .env 可配 CONTROL_LOG=0 进入静默模式(仅记录失败与安全闸拦截), 默认 1=全量记录
-const CONTROL_LOG = path.join(ROOT, 'logs', 'control.log');
+const CONTROL_LOG = path.join(ROOT, 'data', 'logs', 'control.log');
 const CONTROL_LOG_VERBOSE = (process.env.CONTROL_LOG ?? '1') !== '0';
+
 function logControl(msg) {
   try {
     if (!CONTROL_LOG_VERBOSE && !/FAIL|unavailable|reject|error/i.test(msg)) return;
@@ -49,16 +51,16 @@ function logControl(msg) {
 // ---- UIA 只读探测: 判断屏幕坐标处是否为可输入框 (发送前安全闸, 防止消息误伤界面) ----
 // UIA 只读探测走 PowerShell 路线 (uia-probe.js): 系统自带 PS + .NET UIA, EncodedCommand 投递,
 // 零编译/零外部依赖。只读不写, 探测失败/超时 => 放行(可用性优先)。
-const INDEX_FILE = path.join(ROOT, 'index.html');
+const INDEX_FILE = path.join(ROOT, 'public', 'index.html');
 
 // ---- 花妖程序更新(可配置, 地址可能随 CDN 变动而改) ----
 // GARDEN_DOWNLOAD_URL: 完整下载地址, 其中 {v} 会被替换为目标版本号。
 //   真实 CDN 地址属敏感信息, 不内置默认值, 必须由用户在 .env 中自行配置;
 //   未配置时更新功能不可用(后端返回提示, 前端面板也会提示)。
-// GARDEN_INSTALL_DIR:  解压/安装目录(相对 ROOT 或绝对路径), 默认 ROOT 下 hua-yao/
+// GARDEN_INSTALL_DIR:  解压/安装目录(相对 ROOT 或绝对路径), 默认 ROOT 下 data/garden/
 // GARDEN_EXE_NAME:     解压后需要启动的主程序文件名, 其中 {v} 会被替换为目标版本号
 const GARDEN_DOWNLOAD_URL = (process.env.GARDEN_DOWNLOAD_URL || '').trim();
-const GARDEN_INSTALL_DIR = path.resolve(ROOT, process.env.GARDEN_INSTALL_DIR || 'hua-yao');
+const GARDEN_INSTALL_DIR = path.resolve(ROOT, process.env.GARDEN_INSTALL_DIR || 'data/garden');
 const GARDEN_EXE_NAME = process.env.GARDEN_EXE_NAME || 'garden-v{v}-x64.exe';
 const GARDEN_VERSIONS_FILE = path.join(GARDEN_INSTALL_DIR, 'version.json');
 const GARDEN_LOG_FILE = path.join(GARDEN_INSTALL_DIR, 'update.log');
@@ -73,6 +75,7 @@ let lastShotPng = null;
 // UIA 探测结果短时缓存: 同一窗口同一点位 4 秒内直接复用, 省去每次 ~700ms 的 PowerShell 冷启动
 // (输入文本常对同一输入框连续操作, 缓存命中时输入延迟减半; TTL 足够短, 界面变化导致误判的风险可忽略)
 let probeCache = { key: '', at: 0, result: null };
+
 async function captureShot() {
   const frame = await capture.captureFrame();
   lastShotPng = frame.png;
@@ -118,6 +121,7 @@ function updateLog(line) {
   } catch { /* ignore */ }
   console.log('[更新] ' + line);
 }
+
 function readVersionInfo() {
   try {
     return JSON.parse(fs.readFileSync(GARDEN_VERSIONS_FILE, 'utf8'));
@@ -125,23 +129,27 @@ function readVersionInfo() {
     return null;
   }
 }
+
 function writeVersionInfo(info) {
   try {
     fs.mkdirSync(GARDEN_INSTALL_DIR, { recursive: true });
     fs.writeFileSync(GARDEN_VERSIONS_FILE, JSON.stringify(info, null, 2), 'utf8');
   } catch { /* ignore */ }
 }
+
 // 从版本号推算下一个版本(末位 +1): "1.5.0" -> "1.5.1"
 function nextVersion(v) {
   const m = String(v || '').match(/^(\d+)\.(\d+)\.(\d+)$/);
   if (!m) return null;
   return `${m[1]}.${m[2]}.${Number(m[3]) + 1}`;
 }
+
 // 解析版本号为 {major, minor, patch}, 非法返回 null
 function parseVersion(v) {
   const m = /^(\d+)\.(\d+)\.(\d+)$/.exec(String(v || ''));
   return m ? { major: Number(m[1]), minor: Number(m[2]), patch: Number(m[3]) } : null;
 }
+
 // 比较两个解析后的版本: a<b => -1, a>b => 1, 相等 => 0
 function versionCompare(a, b) {
   if (!a || !b) return 0;
@@ -215,6 +223,7 @@ function gardenMissingMessage(reason) {
 // 确保花妖在运行: 进程已存在则不动; 不存在且有已安装版本则自动启动
 // 带服务端锁防止并发触发重复启动(进程检测是主防线)
 let gardenEnsureLock = false;
+
 // 确保花妖在运行并等待就绪: 仅当"当前版本"对应的进程在运行时才算就绪; 没运行或运行的是
 // 其他(旧)版本时, 一律结束旧进程并启动当前版本, 保证操控的始终是最新版。带锁防并发重复启动。
 async function ensureGardenRunning() {
@@ -543,6 +552,18 @@ function serveFile(res, fp, contentType) {
 
 const server = http.createServer(async (req, res) => {
   const url = req.url.split('?')[0];
+
+  // ---- 前端静态资源(public/css, public/js) ----
+  if (req.method === 'GET' && (url.startsWith('/css/') || url.startsWith('/js/'))) {
+    const rel = url.split('?')[0];
+    const fp = path.normalize(path.join(ROOT, 'public', rel));
+    if (!fp.startsWith(path.join(ROOT, 'public') + path.sep)) {
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+      return res.end('Not Found');
+    }
+    const ct = rel.endsWith('.css') ? 'text/css; charset=utf-8' : 'application/javascript; charset=utf-8';
+    return serveFile(res, fp, ct);
+  }
 
   if (req.method === 'GET' && (url === '/' || url === '/index.html')) {
     return serveFile(res, INDEX_FILE, 'text/html; charset=utf-8');

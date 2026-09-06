@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
+<title>花妖 · 操控台</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div class="app">
+  <div class="topbar">
+    <div class="brand"><span id="dot" class="dot"></span><div class="bt">花妖 · 操控台<small id="sub">直接点击模式</small></div></div>
+    <button class="help-btn" id="restartBtn" title="重启花妖">⏻</button>
+    <button class="help-btn" id="updateBtn" title="更新花妖版本">↑</button>
+    <button class="help-btn" id="helpBtn" title="操作说明">?</button>
+  </div>
+
+  <div class="stage" id="stage">
+    <div class="viewport" id="viewport">
+      <img id="ctrlImg" alt="花妖画面" draggable="false" />
+      <div class="vcursor" id="vcursor"><div class="ring"></div></div>
+      <div class="ripple" id="ripple"></div>
+    </div>
+    <div class="live-badge" id="liveBadge"><i></i><i></i><i></i></div>
+    <div class="empty" id="empty">
+      <div id="emptyMsg">正在获取花妖画面…</div>
+      <div class="setup-card" id="setupCard">
+        <div class="setup-icon" id="setupIcon"></div>
+        <h4 id="setupTitle">花妖尚未安装</h4>
+        <p id="setupDesc"></p>
+        <button class="setup-btn" id="setupGoBtn">立即下载安装</button>
+        <div class="setup-alt" id="setupAlt"></div>
+      </div>
+    </div>
+    <div class="loading" id="loading"><div class="spinner"></div></div>
+  </div>
+
+  <div class="bottom">
+    <div class="bar">
+      <button class="tb-btn" id="zoomOutBtn" title="缩小">−</button>
+      <div class="tb-val" id="zoomVal">100%</div>
+      <button class="tb-btn" id="zoomInBtn" title="放大">＋</button>
+      <button class="tb-btn" id="resetBtn" title="复位">⤾</button>
+      <button class="mode-btn" id="modeBtn">🖐 手动</button>
+    </div>
+    <div class="bar">
+      <button class="input-btn" id="inputBtn" title="文本输入">⌨ 输入</button>
+      <button class="click-btn" id="clickBtn">🖱 点击</button>
+    </div>
+  </div>
+
+</div>
+
+<div class="toast" id="toast"></div>
+
+<div class="modal" id="helpModal">
+  <div class="modal-card">
+    <h3>操作说明 <button id="helpClose">×</button></h3>
+    <div class="help-row"><span class="k">直接点击</span><span class="d">默认模式：点画面哪里，就点击花妖哪里（所见即所得）</span></div>
+    <div class="help-row"><span class="k">手动点击</span><span class="d">按「🖐 手动」切换：手指拖动绿色光标定位，再按底部「点击」按钮确认</span></div>
+    <div class="help-row"><span class="k">缩放/平移</span><span class="d">双指捏合缩放；放大后单指或双指拖动即可平移画面</span></div>
+    <div class="help-row"><span class="k">+ − ⤾ ⟳</span><span class="d">底部工具条：放大 / 缩小 / 复位视图 / 刷新画面</span></div>
+    <div class="help-row"><span class="k">⌨ 输入</span><span class="d">先点击画面选中目标输入框，再点「输入」打开面板；回车(或发送键)确认，「清空」开关可覆盖原内容</span></div>
+    <div class="help-row"><span class="k">⏻ 重启</span><span class="d">顶栏「⏻」：结束花妖进程后重新启动最新版，适用于花妖卡死/异常时</span></div>
+    <div class="help-row"><span class="k">↑ 更新</span><span class="d">顶栏「↑」：下载并更新花妖到新版本，支持输入版本号或自动下一版本</span></div>
+    <div class="help-row"><span class="k">首次使用</span><span class="d">画面提示"花妖尚未安装"时，点引导卡「立即下载安装」按面板指引操作（需先在服务器 .env 配置好下载源）</span></div>
+  </div>
+</div>
+
+<div class="modal" id="inputModal" role="dialog" aria-modal="true" aria-label="向花妖输入文本">
+  <div class="modal-card input-card" id="inputCard">
+    <h3>向花妖输入文本 <button id="inputClose" aria-label="关闭">×</button></h3>
+    <div class="tips">文本将发送到之前点击选中的输入框 · 回车发送 · Shift+回车换行</div>
+    <textarea id="inputArea" rows="3" placeholder="输入要发送到已选中输入框的文本…" enterkeyhint="send" aria-label="要发送的文本"></textarea>
+    <label class="clear-row">
+      <span>发送前清空原有内容<span class="hint">关闭 = 追加到末尾 · 打开 = 覆盖原内容</span></span>
+      <span class="switch"><input type="checkbox" id="clearSwitch"><i></i></span>
+    </label>
+    <div class="input-actions">
+      <button id="inputCancel">取消</button>
+      <button id="inputSend">发送</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="updateModal" role="dialog" aria-modal="true" aria-label="更新花妖版本">
+<div class="modal-card update-card" id="updateCard">
+  <h3><span id="updateTitleText">更新花妖版本</span> <button id="updateClose" aria-label="关闭">×</button></h3>
+    <div class="update-info" id="updateInfo">加载中…</div>
+    <div class="update-field">
+      <label for="updateVersion">目标版本号</label>
+      <input id="updateVersion" type="text" inputmode="decimal" placeholder="例如 1.5.1" aria-label="目标版本号" />
+    </div>
+    <div class="update-actions">
+      <button id="updateAuto">自动下一版本</button>
+      <button id="updateGo">更新到此版本</button>
+    </div>
+    <div class="update-steps" id="updateSteps"></div>
+  </div>
+</div>
+
+<div class="modal" id="confirmModal" role="dialog" aria-modal="true" aria-label="确认操作">
+  <div class="modal-card confirm-card">
+    <h3 id="confirmTitle">确认操作 <button id="confirmClose" aria-label="关闭">×</button></h3>
+    <p class="confirm-msg" id="confirmMsg"></p>
+    <div class="confirm-actions">
+      <button id="confirmCancel">取消</button>
+      <button id="confirmOk">确定</button>
+    </div>
+  </div>
+</div>
+
+<script src="js/app.js"></script>
+</body>
+</html>

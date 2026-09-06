@@ -50,7 +50,8 @@ function makeHead(st, flags, w, h) {
 
 // 抓帧 + 变化检测 + 发送(轮询与操作反馈共用)
 async function pushFrame(st) {
-  if (st.busy) return;
+  // 背压保护: 客户端积压超过上限(网络跟不上)时暂缓发帧
+  if (st.busy || st.ws.bufferedAmount > MAX_BUFFERED) return;
   st.busy = true;
   try {
     const fr = await capture.captureImage();
