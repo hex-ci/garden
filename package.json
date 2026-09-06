@@ -10,6 +10,7 @@
   },
   "private": true,
   "dependencies": {
+    "express": "^5.2.1",
     "koffi": "^3.2.1",
     "node-screenshots": "^0.2.8",
     "ws": "^8.21.3",

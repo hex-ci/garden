@@ -1,73 +1,20 @@
-import http from 'node:http';
-import https from 'node:https';
-import fs from 'node:fs';
-import path from 'node:path';
-import { spawn, spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
-import yauzl from 'yauzl'; // 纯 Node ZIP 解压, 不依赖系统 tar/powershell
+// 操控台服务核心: Express 应用(路由/静态资源/JSON 解析) + WS 挂载;
+// 业务能力分属同级模块: capture(抓帧交互)/live(实时画面)/uia-probe(安全闸)/garden(生命周期)/updater(版本更新)/config(配置)/logger(日志)
+import express from 'express';
 import * as capture from './capture.js';
 import { runUiaProbe } from './uia-probe.js';
 import { initLive, noteActivity } from './live.js';
+import { HOST, PORT, PUBLIC_DIR, GARDEN_DOWNLOAD_URL, GARDEN_INSTALL_DIR } from './config.js';
+import { logControl } from './logger.js';
+import { ensureGardenRunning, getGardenInstallState, getGardenProcesses, gardenMissingMessage, killGardenProcesses, nextVersion, readVersionInfo, sleep } from './garden.js';
+import { performUpdate } from './updater.js';
 
-// ROOT = 项目根目录(server/ 的上一级); .env / data/ / public/ 均相对它解析
-const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const app = express();
 
-// ---- 本地环境配置加载(零依赖 .env 解析) ----
-// 优先级: 系统环境变量 > .env 文件 > 代码内默认值。.env 已被 .gitignore 排除, 不随仓库分发。
-function loadEnvFile() {
-  const envFile = path.join(ROOT, '.env');
-  try {
-    if (!fs.existsSync(envFile)) return;
-    const lines = fs.readFileSync(envFile, 'utf8').split(/\r?\n/);
-    for (const line of lines) {
-      const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
-      if (!m) continue;
-      const [, key, raw] = m;
-      if (!(key in process.env)) process.env[key] = raw.replace(/^["']|["']$/g, '');
-    }
-  } catch { /* .env 加载失败不影响启动 */ }
-}
+app.use(express.json({ limit: '1mb' }));
 
-loadEnvFile();
-
-const HOST = process.env.HOST || '0.0.0.0';
-const PORT = Number(process.env.PORT) || 13000;
-// 控制操作日志: 记录每次点击/输入/截图请求与结果, 供远程调试真实用户操作
-// .env 可配 CONTROL_LOG=0 进入静默模式(仅记录失败与安全闸拦截), 默认 1=全量记录
-const CONTROL_LOG = path.join(ROOT, 'data', 'logs', 'control.log');
-const CONTROL_LOG_VERBOSE = (process.env.CONTROL_LOG ?? '1') !== '0';
-
-function logControl(msg) {
-  try {
-    if (!CONTROL_LOG_VERBOSE && !/FAIL|unavailable|reject|error/i.test(msg)) return;
-    fs.mkdirSync(path.dirname(CONTROL_LOG), { recursive: true });
-    if (fs.existsSync(CONTROL_LOG) && fs.statSync(CONTROL_LOG).size > 1024 * 1024) {
-      fs.writeFileSync(CONTROL_LOG, new Date().toISOString() + ' (rotated: 1MB cap)\n');
-    }
-    fs.appendFileSync(CONTROL_LOG, new Date().toISOString().slice(11, 23) + ' ' + msg + '\n');
-  } catch { }
-}
-
-// ---- UIA 只读探测: 判断屏幕坐标处是否为可输入框 (发送前安全闸, 防止消息误伤界面) ----
-// UIA 只读探测走 PowerShell 路线 (uia-probe.js): 系统自带 PS + .NET UIA, EncodedCommand 投递,
-// 零编译/零外部依赖。只读不写, 探测失败/超时 => 放行(可用性优先)。
-const INDEX_FILE = path.join(ROOT, 'public', 'index.html');
-
-// ---- 花妖程序更新(可配置, 地址可能随 CDN 变动而改) ----
-// GARDEN_DOWNLOAD_URL: 完整下载地址, 其中 {v} 会被替换为目标版本号。
-//   真实 CDN 地址属敏感信息, 不内置默认值, 必须由用户在 .env 中自行配置;
-//   未配置时更新功能不可用(后端返回提示, 前端面板也会提示)。
-// GARDEN_INSTALL_DIR:  解压/安装目录(相对 ROOT 或绝对路径), 默认 ROOT 下 data/garden/
-// GARDEN_EXE_NAME:     解压后需要启动的主程序文件名, 其中 {v} 会被替换为目标版本号
-const GARDEN_DOWNLOAD_URL = (process.env.GARDEN_DOWNLOAD_URL || '').trim();
-const GARDEN_INSTALL_DIR = path.resolve(ROOT, process.env.GARDEN_INSTALL_DIR || 'data/garden');
-const GARDEN_EXE_NAME = process.env.GARDEN_EXE_NAME || 'garden-v{v}-x64.exe';
-const GARDEN_VERSIONS_FILE = path.join(GARDEN_INSTALL_DIR, 'version.json');
-const GARDEN_LOG_FILE = path.join(GARDEN_INSTALL_DIR, 'update.log');
-// 从 exe 名模板推导进程名前缀(用于匹配带版本号的运行进程): "garden-v{v}-x64.exe" -> "garden-v"
-const GARDEN_PROC_PREFIX = GARDEN_EXE_NAME.split('{v}')[0].toLowerCase();
-
-// ---- 远程操控模式: 窗口抓帧 + 消息点击 + 消息文本输入（原生模块, 见 capture.js）----
+// 所有 API 响应禁用缓存, 避免浏览器缓存接口结果
+app.use('/api', (req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
 
 // 抓帧到内存(不落盘), 返回 { rect: {x,y,w,h}, png: Buffer };
 // 最近一帧保留在 lastShotPng, 供 GET /api/control/screenshot 直接查看
@@ -85,719 +32,207 @@ async function captureShot() {
   };
 }
 
-function readJsonBody(req) {
-  return new Promise((resolve) => {
-    let data = '';
-    req.on('data', (c) => {
-      data += c;
-      if (data.length > 1e6) req.destroy();
-    });
-    req.on('end', () => {
-      try { resolve(JSON.parse(data || '{}')); }
-      catch { resolve({}); }
-    });
-    req.on('error', () => resolve({}));
-  });
-}
-
-// ===== 花妖程序更新 =====
-// 版本号形如 "1.5.0"; 文件名模板中的 {v} 被替换为目标版本号
-const VERSION_RE = /^\d+\.\d+\.\d+$/;
-// 精确进程名兜底(不含版本号的老式命名), 带版本号的主进程走 GARDEN_PROC_PREFIX 前缀匹配
-const GARDEN_PROC_NAMES = ['garden.exe', 'garden', 'hua-yao.exe', 'huayao.exe'];
-
-// 系统本地时间戳(跟随系统时区, 中国环境即东八区), 格式 YYYY-MM-DD HH:MM:SS
-// 用于更新日志与版本信息, 避免 toISOString() 输出 UTC 导致显示时间不对
-function localTimestamp(d) {
-  const dt = d || new Date();
-  const p = (n) => String(n).padStart(2, '0');
-  return `${dt.getFullYear()}-${p(dt.getMonth() + 1)}-${p(dt.getDate())} ${p(dt.getHours())}:${p(dt.getMinutes())}:${p(dt.getSeconds())}`;
-}
-
-// 读/写更新日志与版本信息(均落在安装目录, 已 .gitignore)
-function updateLog(line) {
-  try {
-    fs.appendFileSync(GARDEN_LOG_FILE, `[${localTimestamp()}] ${line}\n`, 'utf8');
-  } catch { /* ignore */ }
-  console.log('[更新] ' + line);
-}
-
-function readVersionInfo() {
-  try {
-    return JSON.parse(fs.readFileSync(GARDEN_VERSIONS_FILE, 'utf8'));
-  } catch {
-    return null;
-  }
-}
-
-function writeVersionInfo(info) {
-  try {
-    fs.mkdirSync(GARDEN_INSTALL_DIR, { recursive: true });
-    fs.writeFileSync(GARDEN_VERSIONS_FILE, JSON.stringify(info, null, 2), 'utf8');
-  } catch { /* ignore */ }
-}
-
-// 从版本号推算下一个版本(末位 +1): "1.5.0" -> "1.5.1"
-function nextVersion(v) {
-  const m = String(v || '').match(/^(\d+)\.(\d+)\.(\d+)$/);
-  if (!m) return null;
-  return `${m[1]}.${m[2]}.${Number(m[3]) + 1}`;
-}
-
-// 解析版本号为 {major, minor, patch}, 非法返回 null
-function parseVersion(v) {
-  const m = /^(\d+)\.(\d+)\.(\d+)$/.exec(String(v || ''));
-  return m ? { major: Number(m[1]), minor: Number(m[2]), patch: Number(m[3]) } : null;
-}
-
-// 比较两个解析后的版本: a<b => -1, a>b => 1, 相等 => 0
-function versionCompare(a, b) {
-  if (!a || !b) return 0;
-  for (const k of ['major', 'minor', 'patch']) {
-    if (a[k] !== b[k]) return a[k] < b[k] ? -1 : 1;
-  }
-  return 0;
-}
-
-// 找出正在运行的花妖进程并结束
-function killGardenProcesses() {
-  const found = [];
-  try {
-    const r = spawnSync('tasklist', ['/FO', 'CSV', '/NH'], { windowsHide: true, encoding: 'utf8' });
-    const out = r.stdout || '';
-    for (const line of out.split(/\r?\n/)) {
-      const m = line.match(/"([^"]+)\.exe"/i);
-      if (!m) continue;
-      const name = m[1].toLowerCase();
-      // 精确名兜底 + 前缀匹配(覆盖 garden-v1.4.9-x64 这类带版本号的进程名)
-      const isMatch = GARDEN_PROC_NAMES.includes(name) ||
-        (GARDEN_PROC_PREFIX && name.startsWith(GARDEN_PROC_PREFIX));
-      if (isMatch) {
-        found.push(name);
-        try { spawnSync('taskkill', ['/F', '/IM', `${name}.exe`], { windowsHide: true }); } catch { /* ignore */ }
-      }
-    }
-  } catch { /* ignore */ }
-  return found;
-}
-
-// 获取当前正在运行的花妖 exe 完整路径(用于更新失败时恢复旧版), 无则返回 null
-// 返回所有正在运行的 garden 进程 exe 完整路径(普通权限下可读取同用户进程的 Path)
-function getGardenProcesses() {
-  const list = [];
-  try {
-    const script = `Get-Process | Where-Object { $_.ProcessName -like '${GARDEN_PROC_PREFIX}*' } | ForEach-Object { $_.Path }`;
-    const r = spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true, encoding: 'utf8', timeout: 10000 });
-    for (const line of (r.stdout || '').split(/\r?\n/)) {
-      const p = line.trim();
-      if (p && fs.existsSync(p)) list.push(p);
-    }
-  } catch { /* ignore */ }
-  return list;
-}
-
-// 获取第一个正在运行的花妖 exe 完整路径(用于更新失败时恢复旧版), 无则返回 null
-function getRunningGardenExe() {
-  const list = getGardenProcesses();
-  return list.length ? list[0] : null;
-}
-
-// 判定花妖安装状态(依据 version.json 记录 + 当前版本 exe 文件是否真实存在)
-// reason: 'ok' = 已安装可用; 'no_record' = 从未通过操控台安装过; 'exe_missing' = 有记录但程序文件已丢失
-function getGardenInstallState() {
-  const info = readVersionInfo();
-  if (!info || !info.currentVersion) return { installed: false, reason: 'no_record', info: null, exe: null };
-  const verEntry = (info.versions || []).find(v => v.version === info.currentVersion);
-  const exe = (verEntry && verEntry.exe) || null;
-  if (!exe || !fs.existsSync(exe)) return { installed: false, reason: 'exe_missing', info, exe };
-  return { installed: true, reason: 'ok', info, exe };
-}
-
-// 未安装/程序丢失时的用户可读提示
-function gardenMissingMessage(reason) {
-  return reason === 'exe_missing'
-    ? '花妖程序文件已丢失（可能被移动或杀毒软件误删），请重新下载安装'
-    : '花妖尚未安装，请先下载安装花妖程序';
-}
-
-// 确保花妖在运行: 进程已存在则不动; 不存在且有已安装版本则自动启动
-// 带服务端锁防止并发触发重复启动(进程检测是主防线)
-let gardenEnsureLock = false;
-
-// 确保花妖在运行并等待就绪: 仅当"当前版本"对应的进程在运行时才算就绪; 没运行或运行的是
-// 其他(旧)版本时, 一律结束旧进程并启动当前版本, 保证操控的始终是最新版。带锁防并发重复启动。
-async function ensureGardenRunning() {
-  if (gardenEnsureLock) return { started: false, running: true, locked: true };
-  gardenEnsureLock = true;
-  try {
-    const st = getGardenInstallState();
-    if (!st.installed) {
-      // 记录缺失/程序文件丢失时, 花妖进程可能仍在运行(如文件被删后进程尚未退出):
-      // 此时程序实际可用, 放行截图等操作(degraded 降级模式), 只是无法自动拉起新进程
-      const running = getGardenProcesses();
-      if (running.length) return { started: false, running: true, degraded: true };
-      return {
-        started: false, running: false,
-        notInstalled: true, reason: st.reason,
-        error: gardenMissingMessage(st.reason),
-      };
-    }
-    const exe = st.exe;
-
-    // 按完整 exe 路径精确判断当前版本是否在运行(而非只看进程名前缀, 避免误认旧版本进程)
-    const norm = (p) => path.resolve(p).toLowerCase();
-    const running = getGardenProcesses();
-    if (running.some(p => norm(p) === norm(exe))) return { started: false, running: true, exe };
-
-    // 运行的是其他(旧)版本 -> 先结束, 确保只启动当前(最新)版本
-    if (running.length) {
-      killGardenProcesses();
-      await sleep(500);
-    }
-
-    const child = spawn(exe, [], { cwd: path.dirname(exe), detached: true, stdio: 'ignore', windowsHide: false });
-    child.unref();
-    // 等待窗口就绪(最多 30 秒), 就绪后再等 1 秒让界面稳定, 避免截到启动到一半的画面
-    const ready = await waitForGardenWindow(30000);
-    if (ready) await sleep(1000);
-    return { started: true, running: ready, ready, exe };
-  } finally {
-    gardenEnsureLock = false;
-  }
-}
-
-// 校验 zip 文件头魔数, 避免下载到错误页面/损坏文件后盲目解压
-function isValidZip(file) {
-  try {
-    const fd = fs.openSync(file, 'r');
-    const buf = Buffer.alloc(4);
-    fs.readSync(fd, buf, 0, 4, 0);
-    fs.closeSync(fd);
-    const sig = buf.readUInt32LE(0);
-    // PK\x03\x04 本地文件头 / PK\x05\x06 空包 EOCD / PK\x01\x02 中心目录
-    return sig === 0x04034B50 || sig === 0x06054B50 || sig === 0x02014B50;
-  } catch {
-    return false;
-  }
-}
-
-// 下载 URL 到本地临时文件(跟随重定向), 返回临时文件路径
-function downloadToTemp(url) {
-  return new Promise((resolve, reject) => {
-    const tmp = path.join(ROOT, `.garden-dl-${Date.now()}-${Math.random().toString(36).slice(2)}.zip`);
-    const file = fs.createWriteStream(tmp);
-    const req = https.get(url, { headers: { 'User-Agent': 'garden-control/1.0' } }, (res) => {
-      // 重定向跟随(最多 5 次)
-      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        file.close();
-        fs.unlinkSync(tmp);
-        const next = new URL(res.headers.location, url).toString();
-        resolve(downloadToTemp(next));
-        return;
-      }
-      if (res.statusCode !== 200) {
-        file.close();
-        fs.unlinkSync(tmp);
-        reject(new Error(`下载失败(HTTP ${res.statusCode})`));
-        return;
-      }
-      res.pipe(file);
-      file.on('finish', () => file.close(() => resolve(tmp)));
-      file.on('error', (e) => { try { fs.unlinkSync(tmp); } catch {} reject(e); });
-    });
-    req.on('error', (e) => { try { fs.unlinkSync(tmp); } catch {} reject(e); });
-    req.setTimeout(120000, () => { req.destroy(new Error('下载超时')); });
-  });
-}
-
-// 解压 zip(纯 Node 实现, 基于 yauzl, 不依赖系统 tar/powershell)
-// 使用 lazyEntries + 逐条处理, 正确解析含 data-descriptor 的 zip, 失败/损坏返回 false
-function extractZip(zipFile, destDir) {
-  return new Promise((resolve) => {
-    let done = false;
-    const finish = (ok) => { if (!done) { done = true; resolve(ok); } };
-    try { fs.mkdirSync(destDir, { recursive: true }); } catch { /* ignore */ }
-    yauzl.open(zipFile, { lazyEntries: true, autoClose: true }, (err, zipfile) => {
-      if (err || !zipfile) { finish(false); return; }
-      zipfile.on('error', () => finish(false));
-      zipfile.on('end', () => finish(true));
-      zipfile.on('entry', (entry) => {
-        const target = path.join(destDir, entry.fileName);
-        if (entry.fileName.endsWith('/')) {
-          try { fs.mkdirSync(target, { recursive: true }); } catch { /* ignore */ }
-          zipfile.readEntry();
-          return;
-        }
-        try { fs.mkdirSync(path.dirname(target), { recursive: true }); } catch { /* ignore */ }
-        zipfile.openReadStream(entry, (err2, stream) => {
-          if (err2 || !stream) { finish(false); return; }
-          const ws = fs.createWriteStream(target);
-          stream.on('error', () => finish(false));
-          ws.on('error', () => finish(false));
-          ws.on('finish', () => zipfile.readEntry());
-          stream.pipe(ws);
-        });
-      });
-      zipfile.readEntry();
-    });
-  });
-}
-
-// 在安装目录内查找启动程序(优先按配置名精确匹配, 回退任意 .exe)
-function findGardenExe(dir, ver) {
-  const prefer = GARDEN_EXE_NAME.replace(/\{v\}/g, ver).toLowerCase();
-  const walk = (d, depth) => {
-    if (depth > 4) return null;
-    let entries;
-    try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { return null; }
-    for (const e of entries) {
-      const p = path.join(d, e.name);
-      if (e.isDirectory()) {
-        const hit = walk(p, depth + 1);
-        if (hit) return hit;
-      } else if (e.name.toLowerCase().endsWith('.exe')) {
-        if (e.name.toLowerCase() === prefer) return p;
-      }
-    }
-    // 第二遍: 任意 .exe 兜底
-    for (const e of entries) {
-      if (e.isDirectory()) continue;
-      if (e.name.toLowerCase().endsWith('.exe')) return path.join(d, e.name);
-    }
-    return null;
-  };
-  return walk(dir, 0);
-}
-
-// 预先添加 Windows 防火墙放行规则, 避免新版 exe 首次启动弹出"允许联网"对话框
-// 需要管理员权限; 失败返回 false(由调用方提示)
-function addFirewallRule(exePath) {
-  const ruleName = 'Garden HuaYao';
-  try {
-    // 先删除同名旧规则(可能不存在, 忽略), 再分别添加入站/出站允许规则
-    spawnSync('netsh', ['advfirewall', 'firewall', 'delete', 'rule', `name=${ruleName}`], { windowsHide: true });
-    spawnSync('netsh', ['advfirewall', 'firewall', 'delete', 'rule', `name=${ruleName}-out`], { windowsHide: true });
-    const inR = spawnSync('netsh', ['advfirewall', 'firewall', 'add', 'rule',
-      `name=${ruleName}`, 'dir=in', 'action=allow', `program=${exePath}`, 'enable=yes', 'profile=any'], { windowsHide: true });
-    const outR = spawnSync('netsh', ['advfirewall', 'firewall', 'add', 'rule',
-      `name=${ruleName}-out`, 'dir=out', 'action=allow', `program=${exePath}`, 'enable=yes', 'profile=any'], { windowsHide: true });
-    return inR.status === 0 && outR.status === 0;
-  } catch {
-    return false;
-  }
-}
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-// 轮询等待新版花妖窗口出现(窗口标题"花妖" + 进程名前缀匹配), 超时返回 false
-// 用于启动新版程序后等待其就绪, 避免前端立即刷新截图时程序还没启动完
-async function waitForGardenWindow(timeoutMs = 15000) {
-  // 用 [char] 拼出"花妖", 避免命令行中文编码问题
-  const titleCode = '([string][char]0x82B1 + [char]0x5996)';
-  const script = `$t = ${titleCode}; $p = Get-Process | Where-Object { $_.ProcessName -like '${GARDEN_PROC_PREFIX}*' -and $_.MainWindowTitle -eq $t } | Select-Object -First 1; if ($p) { Write-Output 'READY' }`;
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    try {
-      const r = spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true, encoding: 'utf8', timeout: 10000 });
-      if ((r.stdout || '').includes('READY')) return true;
-    } catch { /* ignore */ }
-    await sleep(600);
-  }
-  return false;
-}
-
-async function performUpdate(targetVersion) {
-  const steps = [];
-  const log = (s) => { steps.push(s); updateLog(s); };
-  const info = { lastVersion: null, currentVersion: null, lastUpdated: null, versions: [] };
-  const prev = readVersionInfo();
-  if (prev) Object.assign(info, prev);
-  info.versions = Array.isArray(info.versions) ? info.versions : [];
-  // 记录旧版 exe(kill 之前先探测运行中的 + 版本记录里的), 更新失败时用于恢复
-  const runningExe = getRunningGardenExe();
-  const oldExe = ((info.versions.find(v => v.version === info.currentVersion)) || {}).exe || null;
-  const backupExe = runningExe || oldExe;
-  let oldKilled = false;
-  let zipFile = null; // 下载临时文件(无论成功/失败, finally 兜底清理)
-  let tmpDir = null;  // 解压临时目录(同上)
-
-  try {
-    const ver = String(targetVersion || '').trim();
-    if (!VERSION_RE.test(ver)) {
-      return { ok: false, error: 'bad version', message: '版本号格式应为 x.y.z，例如 1.5.0' };
-    }
-    // 禁止降级: 花妖是游戏辅助工具, 旧版本可能已被游戏限制, 没有回退意义, 一律不允许降级
-    if (info.currentVersion && versionCompare(parseVersion(ver), parseVersion(info.currentVersion)) < 0) {
-      return { ok: false, error: 'downgrade blocked',
-        message: `不允许降级: 当前版本 ${info.currentVersion}，目标 ${ver} 是更低版本` };
-    }
-    if (!GARDEN_DOWNLOAD_URL) {
-      throw new Error('未配置下载地址，请在 .env 中设置 GARDEN_DOWNLOAD_URL（{v} 占位版本号）');
-    }
-    const url = GARDEN_DOWNLOAD_URL.replace(/\{v\}/g, ver);
-    log(`开始更新到版本 ${ver}，下载地址: ${url}`);
-
-    // ---- 先完成所有可能失败的准备步骤(下载/校验/解压/定位), 全部成功后才动运行中的花妖 ----
-    // 1) 下载 + 校验
-    log('正在下载压缩包…');
-    zipFile = await downloadToTemp(url);
-    const zip = zipFile;
-    let zipSize = 0;
-    try { zipSize = fs.statSync(zip).size; } catch { /* ignore */ }
-    if (zipSize <= 0) throw new Error('下载内容为空');
-    if (!isValidZip(zip)) throw new Error('下载的文件不是有效的 zip 压缩包(可能是版本号错误或文件损坏)');
-
-    // 2) 解压到临时目录(不能直接解压到正式目录: 同版本更新时旧 exe 正被运行进程占用会写入失败)
-    log(`下载完成(${Math.round(zipSize / 1024)} KB)，正在解压…`);
-    const verDir = path.join(GARDEN_INSTALL_DIR, `v${ver}`);
-    tmpDir = path.join(GARDEN_INSTALL_DIR, `.tmp-${ver}-${Date.now()}`);
-    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
-    const extracted = await extractZip(zip, tmpDir);
-    try { fs.unlinkSync(zip); } catch { /* ignore */ }
-    if (!extracted) {
-      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
-      throw new Error('解压失败(压缩包可能已损坏)');
-    }
-
-    // 3) 定位新版主程序(解压产物校验), 找不到说明包内容不对
-    const tmpExe = findGardenExe(tmpDir, ver);
-    if (!tmpExe) {
-      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
-      throw new Error(`解压后未找到可执行文件(${GARDEN_EXE_NAME.replace(/\{v\}/g, ver)})`);
-    }
-    log(`新版程序就绪: ${tmpExe}`);
-
-    // ---- 准备就绪, 开始切换 ----
-    // 4) 结束正在运行的花妖(释放旧 exe 文件占用)
-    const killed = killGardenProcesses();
-    oldKilled = true;
-    log(killed.length ? `已结束运行中的花妖进程: ${killed.join(', ')}` : '未发现运行中的花妖进程');
-    await sleep(500); // 等进程完全退出、文件句柄释放
-
-    // 5) 把临时目录移入正式版本目录(此时旧目录可安全删除)
-    try { fs.rmSync(verDir, { recursive: true, force: true }); } catch { /* ignore */ }
-    try { fs.renameSync(tmpDir, verDir); } catch (e) {
-      throw new Error('安装目录移动失败: ' + e.message, {
-		    cause: e,
-	    });
-    }
-    const exe = path.join(verDir, path.relative(tmpDir, tmpExe));
-    log(`已安装到: ${exe}`);
-
-    // 6) 预先放行防火墙, 避免首次启动弹出 Windows "允许联网" 对话框
-    const fw = addFirewallRule(exe);
-    log(fw ? '已预添加防火墙放行规则' : '未能添加防火墙规则(服务可能需要以管理员身份运行), 若弹出联网提示请手动允许');
-
-    // 7) 启动新版
-    const child = spawn(exe, [], { cwd: path.dirname(exe), detached: true, stdio: 'ignore', windowsHide: false });
-    child.unref();
-    log(`已启动新版花妖 (PID ${child.pid})`);
-
-    // 7) 等待新版花妖窗口就绪后再返回, 避免前端立即刷新截图时程序还没启动完
-    const winReady = await waitForGardenWindow();
-    if (winReady) {
-      await sleep(1000); // 窗口出现后再等 1 秒, 让界面稳定
-      log('新版花妖窗口已就绪');
-    } else {
-      log('等待新版花妖窗口超时(可稍后手动刷新画面)');
-    }
-
-    // 9) 记录版本信息
-    const now = localTimestamp(); // 本地时区(东八区)时间, 与日志一致
-    // 区分动作语义: 首次安装 / 同版本重装(程序丢失后恢复) / 日常更新
-    const verAction = !info.currentVersion ? '已安装'
-      : (info.currentVersion === ver ? '已重新安装' : '已更新到');
-    if (info.currentVersion !== ver) {
-      info.lastVersion = info.currentVersion; // 仅版本变化时才更新"上一版本"
-    }
-    info.currentVersion = ver;
-    info.lastUpdated = now;
-    // versions 按版本去重: 同版本重复更新只覆盖最近一次时间, 不堆叠相同记录
-    const entry = { version: ver, updatedAt: now, exe };
-    const idx = info.versions.findIndex(h => h.version === ver);
-    if (idx >= 0) info.versions[idx] = entry;
-    else info.versions.push(entry);
-    writeVersionInfo(info);
-
-    log(`更新完成: 当前版本 ${ver}`);
-    return { ok: true, message: `${verAction} ${ver} 并启动`, version: ver, steps, info };
-  } catch (e) {
-    log(`更新失败: ${e.message}`);
-    // 兜底: 若旧版已被结束但更新中途失败, 尝试恢复旧版, 避免操控台失联
-    if (oldKilled && backupExe && fs.existsSync(backupExe)) {
-      try {
-        const rc = spawn(backupExe, [], { cwd: path.dirname(backupExe), detached: true, stdio: 'ignore', windowsHide: false });
-        rc.unref();
-        log(`已尝试恢复旧版花妖: ${backupExe}`);
-      } catch { /* ignore */ }
-    }
-    return { ok: false, error: 'update failed', message: e.message, steps };
-  } finally {
-    // 兜底清理: 无论成功/失败/异常, 确保下载临时文件与解压临时目录都被清除
-    if (zipFile) { try { fs.unlinkSync(zipFile); } catch { /* ignore */ } }
-    if (tmpDir) { try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ } }
-  }
-}
-
-function serveFile(res, fp, contentType) {
-  fs.readFile(fp, (err, data) => {
-    if (err) {
-      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
-      return res.end('Not Found');
-    }
-    res.writeHead(200, { 'Content-Type': contentType, 'Cache-Control': 'no-store' });
-    res.end(data);
-  });
-}
-
-const server = http.createServer(async (req, res) => {
-  const url = req.url.split('?')[0];
-
-  // ---- 前端静态资源(public/css, public/js) ----
-  if (req.method === 'GET' && (url.startsWith('/css/') || url.startsWith('/js/'))) {
-    const rel = url.split('?')[0];
-    const fp = path.normalize(path.join(ROOT, 'public', rel));
-    if (!fp.startsWith(path.join(ROOT, 'public') + path.sep)) {
-      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
-      return res.end('Not Found');
-    }
-    const ct = rel.endsWith('.css') ? 'text/css; charset=utf-8' : 'application/javascript; charset=utf-8';
-    return serveFile(res, fp, ct);
-  }
-
-  if (req.method === 'GET' && (url === '/' || url === '/index.html')) {
-    return serveFile(res, INDEX_FILE, 'text/html; charset=utf-8');
-  }
-
-  // ---- 远程操控模式(主功能) ----
-  if (req.method === 'GET' && url === '/api/control/screenshot') {
-    if (!lastShotPng) {
-      res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
-      return res.end(JSON.stringify({ error: 'no control screenshot', message: '暂无截图' }));
-    }
-    res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-store' });
-    return res.end(lastShotPng);
-  }
-
-  if (req.method === 'POST' && url === '/api/control/shot') {
-    // 刷新前先确保花妖在运行(被杀/退出后自动拉起, 进程检测防重复启动)
-    const ensured = await ensureGardenRunning();
-    // 花妖未安装/程序文件丢失: 直接返回结构化标记, 由前端展示"下载安装"引导
-    if (ensured.notInstalled) {
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
-      return res.end(JSON.stringify({
-        ok: false,
-        notInstalled: true,
-        reason: ensured.reason,
-        message: ensured.error,
-      }));
-    }
-    // 刚拉起但窗口尚未就绪: 不截图, 提示稍后刷新, 避免截到未启动完的画面
-    if (ensured.started && !ensured.ready) {
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
-      return res.end(JSON.stringify({ ok: false, autoStarted: true, message: '花妖正在启动，请稍后再刷新画面' }));
-    }
-    try {
-      const ts0 = Date.now();
-      const cap = await captureShot();
-      logControl(`shot ok capMs=${Date.now() - ts0} rect=${cap.rect.x},${cap.rect.y} ${cap.rect.w}x${cap.rect.h}`);
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
-      return res.end(JSON.stringify({
-        ok: true,
-        message: '画面已刷新',
-        rect: cap.rect,
-        image: cap.png.toString('base64'),
-        ...(ensured.started ? { autoStarted: true } : {}),
-        ...(ensured.error ? { ensureError: ensured.error } : {}),
-      }));
-    } catch (e) {
-      res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
-      return res.end(JSON.stringify({ ok: false, message: '截图失败: ' + e.message }));
-    }
-  }
-
-  // 重启花妖: 结束进程后重新启动当前版本(复用 killGardenProcesses + ensureGardenRunning)
-  if (req.method === 'POST' && url === '/api/control/restart') {
-    // 未安装/程序文件丢失时无法重启: 直接返回引导标记, 不做无意义的 kill
-    const preState = getGardenInstallState();
-    if (!preState.installed) {
-      const stillRunning = getGardenProcesses().length > 0;
-      const msg = gardenMissingMessage(preState.reason) +
-        (stillRunning ? '；为避免唯一运行中的实例被关闭后无法恢复，已跳过本次重启' : '');
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
-      return res.end(JSON.stringify({
-        ok: false,
-        notInstalled: true,
-        reason: preState.reason,
-        message: msg,
-      }));
-    }
-    const killed = killGardenProcesses();
-    await sleep(600); // 等进程退出、文件句柄释放
-    const ensured = await ensureGardenRunning();
-    capture.invalidate(); // 花妖重启后窗口句柄变化, 强制重新查找
-    if (ensured.error) {
-      res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
-      return res.end(JSON.stringify({ ok: false, message: ensured.error }));
-    }
-    if (ensured.started && !ensured.ready) {
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
-      return res.end(JSON.stringify({ ok: false, message: '花妖正在启动，请稍后再刷新画面' }));
-    }
-    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
-    return res.end(JSON.stringify({
-      ok: true,
-      killed: killed.length,
-      autoStarted: !!ensured.started,
-      message: killed.length ? '花妖已重新启动' : '花妖未在运行，已启动最新版',
-    }));
-  }
-
-  if (req.method === 'POST' && url === '/api/control/click') {
-    const body = await readJsonBody(req);
-    const x = Math.round(Number(body.x));
-    const y = Math.round(Number(body.y));
-    if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0 || x > 99999 || y > 99999) {
-      res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ ok: false, error: 'invalid coords', message: '坐标参数无效' }));
-    }
-    try {
-      // 消息点击(后台可送达)。实时模式(noimg)下跳过等待与抓帧: 秒回确认, 画面由实时突发帧呈现
-      const t0 = Date.now();
-      capture.clientClick(x, y);
-      noteActivity();   // 实时画面短时突发提速
-      if (body.noimg === true) {
-        logControl(`click(${x},${y}) ok noimg total=${Date.now() - t0}ms`);
-        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
-        return res.end(JSON.stringify({ ok: true, message: '已点击 (' + x + ',' + y + ')' }));
-      }
-      await sleep(150);
-      const cap = await captureShot();
-      logControl(`click(${x},${y}) ok total=${Date.now() - t0}ms`);
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
-      return res.end(JSON.stringify({
-        ok: true,
-        message: '已点击 (' + x + ',' + y + ')',
-        rect: cap.rect,
-        image: cap.png.toString('base64'),
-      }));
-    } catch (e) {
-      logControl(`click(${x},${y}) FAIL ${e.message}`);
-      res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
-      return res.end(JSON.stringify({ ok: false, message: '点击失败: ' + e.message }));
-    }
-  }
-
-  if (req.method === 'POST' && url === '/api/control/input') {
-    const body = await readJsonBody(req);
-    const x = Math.round(Number(body.x));
-    const y = Math.round(Number(body.y));
-    if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0 || x > 99999 || y > 99999) {
-      res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ ok: false, error: 'invalid coords', message: '坐标参数无效' }));
-    }
-    if (typeof body.text !== 'string' || !body.text.trim()) {
-      res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ ok: false, error: 'empty text', message: '请输入要发送的文本' }));
-    }
-    if (body.text.length > 2000) {
-      res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ ok: false, error: 'text too long', message: '文本过长(最多 2000 字符)' }));
-    }
-    // clear: 兼容布尔 true/false 与字符串 "1"/"0"; clear=true 覆盖原内容, 否则追加
-    const clear = body.clear === true || body.clear === '1' || body.clear === 1;
-    try {
-      const t0 = Date.now();
-      // 发送前安全闸: 只读探测点击处是否为可输入框(不是则一个消息都不发, 界面零扰动)
-      const w = capture.getWindow();
-      if (!w) throw new Error('未找到花妖窗口');
-      const origin = capture.clientOrigin(w.hwnd);
-      const pid = capture.getTargetPid();
-      const ck = pid + ':' + (origin.x + x) + ':' + (origin.y + y);
-      const nowMs = Date.now();
-      let probe;
-      if (probeCache.result && probeCache.key === ck && nowMs - probeCache.at < 4000) {
-        probe = probeCache.result;
-      } else {
-        probe = await runUiaProbe(pid, origin.x + x, origin.y + y);
-        probeCache = { key: ck, at: nowMs, result: probe };
-      }
-      if (probe.unavailable) {
-        logControl(`input(${x},${y}) probe unavailable: ${probe.error || 'unknown'} (fail-open)`);
-      } else if (!probe.editable) {
-        logControl(`input(${x},${y}) gate reject kind=${probe.kind} type=${probe.controlType}`);
-        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
-        return res.end(JSON.stringify({ ok: false, message: '点击位置不是可输入框，未发送' }));
-      }
-      // 纯消息文本输入(点击+END/三击全选+WM_CHAR), 后台可送达, 不抢系统焦点
-      await capture.sendTextInput(x, y, body.text, !clear);
-      noteActivity();   // 实时画面短时突发提速
-      if (body.noimg === true) {
-        logControl(`input(${x},${y}) clear=${clear} ok noimg total=${Date.now() - t0}ms`);
-        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
-        return res.end(JSON.stringify({ ok: true, message: '文本已发送' + (clear ? '(已清空)' : '') }));
-      }
-      await sleep(250);   // 让渲染器消化输入后再抓帧反馈
-      const t1 = Date.now();
-      const cap = await captureShot();
-      logControl(`input(${x},${y}) clear=${clear} ok msg total=${Date.now() - t0}ms capMs=${Date.now() - t1}`);
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
-      return res.end(JSON.stringify({
-        ok: true,
-        message: '文本已发送' + (clear ? '(已清空)' : ''),
-        rect: cap.rect,
-        image: cap.png.toString('base64'),
-      }));
-    } catch (e) {
-      logControl(`input(${x},${y}) FAIL ${e.message}`);
-      res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
-      return res.end(JSON.stringify({ ok: false, message: '文本输入失败: ' + e.message }));
-    }
-  }
-
-  // ---- 花妖程序更新 ----
-  // 查看当前版本信息与下载地址配置
-  if (req.method === 'GET' && url === '/api/garden/update') {
-    const info = readVersionInfo() || {};
-    const st = getGardenInstallState();
-    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
-    return res.end(JSON.stringify({
-      ok: true,
-      currentVersion: info.currentVersion || null,
-      lastVersion: info.lastVersion || null,
-      lastUpdated: info.lastUpdated || null,
-      versions: Array.isArray(info.versions) ? info.versions : [],
-      installed: st.installed,
-      installReason: st.reason,
-      downloadUrl: GARDEN_DOWNLOAD_URL || null,
-      configured: !!GARDEN_DOWNLOAD_URL,
-      installDir: GARDEN_INSTALL_DIR,
-    }));
-  }
-
-  // 执行更新; body: { version } 或 { auto: true }(自动探测下一版本)
-  if (req.method === 'POST' && url === '/api/garden/update') {
-    const body = await readJsonBody(req);
-    let target = body.version;
-    if (body.auto === true || body.auto === '1' || body.auto === 1) {
-      const info = readVersionInfo() || {};
-      const base = info.currentVersion || info.lastVersion || '0.0.0';
-      target = nextVersion(base);
-      if (!target) {
-        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-        return res.end(JSON.stringify({ ok: false, error: 'bad version', message: '无法从当前版本推算下一版本，请手动指定版本号' }));
-      }
-    }
-    const result = await performUpdate(target);
-    res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
-    return res.end(JSON.stringify(result));
-  }
-
-  res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
-  res.end('Not Found');
+// ---- 操控 API ----
+// 最近一帧截图(内存直出)
+app.get('/api/control/screenshot', (req, res) => {
+  if (!lastShotPng) return res.status(404).json({ error: 'no control screenshot', message: '暂无截图' });
+  res.type('image/png').send(lastShotPng);
 });
 
-server.listen(PORT, HOST, () => {
+// 刷新画面: 确保花妖在运行(未安装/程序丢失返回引导标记)后抓帧
+app.post('/api/control/shot', async (req, res) => {
+  const ensured = await ensureGardenRunning();
+  if (ensured.notInstalled) {
+    return res.json({ ok: false, notInstalled: true, reason: ensured.reason, message: ensured.error });
+  }
+  // 刚拉起但窗口尚未就绪: 不截图, 提示稍后刷新, 避免截到未启动完的画面
+  if (ensured.started && !ensured.ready) {
+    return res.json({ ok: false, autoStarted: true, message: '花妖正在启动，请稍后再刷新画面' });
+  }
+  try {
+    const ts0 = Date.now();
+    const cap = await captureShot();
+    logControl(`shot ok capMs=${Date.now() - ts0} rect=${cap.rect.x},${cap.rect.y} ${cap.rect.w}x${cap.rect.h}`);
+    res.json({
+      ok: true,
+      message: '画面已刷新',
+      rect: cap.rect,
+      image: cap.png.toString('base64'),
+      ...(ensured.started ? { autoStarted: true } : {}),
+      ...(ensured.error ? { ensureError: ensured.error } : {}),
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, message: '截图失败: ' + e.message });
+  }
+});
+
+// 重启花妖: 结束进程后重新启动当前版本(复用 killGardenProcesses + ensureGardenRunning)
+app.post('/api/control/restart', async (req, res) => {
+  // 未安装/程序文件丢失时无法重启: 直接返回引导标记, 不做无意义的 kill
+  const preState = getGardenInstallState();
+  if (!preState.installed) {
+    const stillRunning = getGardenProcesses().length > 0;
+    const msg = gardenMissingMessage(preState.reason) +
+      (stillRunning ? '；为避免唯一运行中的实例被关闭后无法恢复，已跳过本次重启' : '');
+    return res.json({ ok: false, notInstalled: true, reason: preState.reason, message: msg });
+  }
+  const killed = killGardenProcesses();
+  await sleep(600); // 等进程退出、文件句柄释放
+  const ensured = await ensureGardenRunning();
+  capture.invalidate(); // 花妖重启后窗口句柄变化, 强制重新查找
+  if (ensured.error) return res.status(500).json({ ok: false, message: ensured.error });
+  if (ensured.started && !ensured.ready) {
+    return res.json({ ok: false, message: '花妖正在启动，请稍后再刷新画面' });
+  }
+  res.json({
+    ok: true,
+    killed: killed.length,
+    autoStarted: !!ensured.started,
+    message: killed.length ? '花妖已重新启动' : '花妖未在运行，已启动最新版',
+  });
+});
+
+// 消息点击(后台可送达)。实时模式(noimg)下跳过等待与抓帧: 秒回确认, 画面由实时突发帧呈现
+app.post('/api/control/click', async (req, res) => {
+  const x = Math.round(Number(req.body.x));
+  const y = Math.round(Number(req.body.y));
+  if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0 || x > 99999 || y > 99999) {
+    return res.status(400).json({ ok: false, error: 'invalid coords', message: '坐标参数无效' });
+  }
+  try {
+    const t0 = Date.now();
+    capture.clientClick(x, y);
+    noteActivity();   // 实时画面短时突发提速
+    if (req.body.noimg === true) {
+      logControl(`click(${x},${y}) ok noimg total=${Date.now() - t0}ms`);
+      return res.json({ ok: true, message: '已点击 (' + x + ',' + y + ')' });
+    }
+    await sleep(150);
+    const cap = await captureShot();
+    logControl(`click(${x},${y}) ok total=${Date.now() - t0}ms`);
+    res.json({
+      ok: true,
+      message: '已点击 (' + x + ',' + y + ')',
+      rect: cap.rect,
+      image: cap.png.toString('base64'),
+    });
+  } catch (e) {
+    logControl(`click(${x},${y}) FAIL ${e.message}`);
+    res.status(500).json({ ok: false, message: '点击失败: ' + e.message });
+  }
+});
+
+// 文本输入: 安全闸(只读探测)通过后才发消息; noimg 模式秒回, 画面由实时突发帧呈现
+app.post('/api/control/input', async (req, res) => {
+  const x = Math.round(Number(req.body.x));
+  const y = Math.round(Number(req.body.y));
+  if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0 || x > 99999 || y > 99999) {
+    return res.status(400).json({ ok: false, error: 'invalid coords', message: '坐标参数无效' });
+  }
+  if (typeof req.body.text !== 'string' || !req.body.text.trim()) {
+    return res.status(400).json({ ok: false, error: 'empty text', message: '请输入要发送的文本' });
+  }
+  if (req.body.text.length > 2000) {
+    return res.status(400).json({ ok: false, error: 'text too long', message: '文本过长(最多 2000 字符)' });
+  }
+  // clear: 兼容布尔 true/false 与字符串 "1"/"0"; clear=true 覆盖原内容, 否则追加
+  const clear = req.body.clear === true || req.body.clear === '1' || req.body.clear === 1;
+  try {
+    const t0 = Date.now();
+    // 发送前安全闸: 只读探测点击处是否为可输入框(不是则一个消息都不发, 界面零扰动)
+    const w = capture.getWindow();
+    if (!w) throw new Error('未找到花妖窗口');
+    const origin = capture.clientOrigin(w.hwnd);
+    const pid = capture.getTargetPid();
+    const ck = pid + ':' + (origin.x + x) + ':' + (origin.y + y);
+    const nowMs = Date.now();
+    let probe;
+    if (probeCache.result && probeCache.key === ck && nowMs - probeCache.at < 4000) {
+      probe = probeCache.result;
+    } else {
+      probe = await runUiaProbe(pid, origin.x + x, origin.y + y);
+      probeCache = { key: ck, at: nowMs, result: probe };
+    }
+    if (probe.unavailable) {
+      logControl(`input(${x},${y}) probe unavailable: ${probe.error || 'unknown'} (fail-open)`);
+    } else if (!probe.editable) {
+      logControl(`input(${x},${y}) gate reject kind=${probe.kind} type=${probe.controlType}`);
+      return res.json({ ok: false, message: '点击位置不是可输入框，未发送' });
+    }
+    // 纯消息文本输入(点击+END/三击全选+WM_CHAR), 后台可送达, 不抢系统焦点
+    await capture.sendTextInput(x, y, req.body.text, !clear);
+    noteActivity();   // 实时画面短时突发提速
+    if (req.body.noimg === true) {
+      logControl(`input(${x},${y}) clear=${clear} ok noimg total=${Date.now() - t0}ms`);
+      return res.json({ ok: true, message: '文本已发送' + (clear ? '(已清空)' : '') });
+    }
+    await sleep(250);   // 让渲染器消化输入后再抓帧反馈
+    const t1 = Date.now();
+    const cap = await captureShot();
+    logControl(`input(${x},${y}) clear=${clear} ok msg total=${Date.now() - t0}ms capMs=${Date.now() - t1}`);
+    res.json({
+      ok: true,
+      message: '文本已发送' + (clear ? '(已清空)' : ''),
+      rect: cap.rect,
+      image: cap.png.toString('base64'),
+    });
+  } catch (e) {
+    logControl(`input(${x},${y}) FAIL ${e.message}`);
+    res.status(500).json({ ok: false, message: '文本输入失败: ' + e.message });
+  }
+});
+
+// ---- 花妖程序更新 ----
+// 查看当前版本信息与下载地址配置
+app.get('/api/garden/update', (req, res) => {
+  const info = readVersionInfo() || {};
+  const st = getGardenInstallState();
+  res.json({
+    ok: true,
+    currentVersion: info.currentVersion || null,
+    lastVersion: info.lastVersion || null,
+    lastUpdated: info.lastUpdated || null,
+    versions: Array.isArray(info.versions) ? info.versions : [],
+    installed: st.installed,
+    installReason: st.reason,
+    downloadUrl: GARDEN_DOWNLOAD_URL || null,
+    configured: !!GARDEN_DOWNLOAD_URL,
+    installDir: GARDEN_INSTALL_DIR,
+  });
+});
+
+// 执行更新; body: { version } 或 { auto: true }(自动探测下一版本)
+app.post('/api/garden/update', async (req, res) => {
+  let target = req.body.version;
+  if (req.body.auto === true || req.body.auto === '1' || req.body.auto === 1) {
+    const info = readVersionInfo() || {};
+    const base = info.currentVersion || info.lastVersion || '0.0.0';
+    target = nextVersion(base);
+    if (!target) {
+      return res.status(400).json({ ok: false, error: 'bad version', message: '无法从当前版本推算下一版本，请手动指定版本号' });
+    }
+  }
+  const result = await performUpdate(target);
+  res.status(result.ok ? 200 : 400).json(result);
+});
+
+// ---- 前端静态资源(public/) + 404 ----
+app.use(express.static(PUBLIC_DIR, { etag: false, lastModified: false, setHeaders: (res) => res.setHeader('Cache-Control', 'no-store') }));
+
+app.use((req, res) => {
+  res.status(404).type('text/plain; charset=utf-8').send('Not Found');
+});
+
+// 兜底错误处理: JSON 解析失败 / 未捕获异常
+app.use((err, req, res, next) => {   // eslint-disable-line no-unused-vars
+  if (err?.type === 'entity.parse.failed' || err instanceof SyntaxError) {
+    return res.status(400).json({ ok: false, error: 'bad json', message: '请求体不是有效 JSON' });
+  }
+  console.error(err);
+  res.status(500).json({ ok: false, message: '服务器内部错误' });
+});
+
+const server = app.listen(PORT, HOST, () => {
   console.log('花妖操控台已启动 ->  http://' + (HOST === '0.0.0.0' ? 'localhost' : HOST) + ':' + PORT);
 });
 
