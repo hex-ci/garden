@@ -2,75 +2,52 @@
 
 ## 项目概述
 
-这是"花妖"(HuaYao)游戏**远程操控台**：通过浏览器实时查看"花妖"桌面程序的画面，单击画面即可在花妖窗口对应位置执行鼠标点击。打开页面即为全屏操控界面。
+这是"花妖"(HuaYao)游戏**远程操控台**：通过浏览器实时查看"花妖"桌面程序（Tauri + WebView2）的画面，单击画面即可在花妖窗口对应位置执行点击，还支持向输入框发送文本。核心特性是**全后台操控**——RDP 最小化、窗口被完全遮挡、花妖在后台时，截图/点击/输入均正常工作。
 
-技术栈为 **Node.js 后端 + HTML5 前端 + AutoHotkey v2 脚本**，仅依赖 `yauzl`（纯 Node ZIP 解压，用于花妖更新，替代系统 tar/powershell）。后端用 `child_process` spawn 一次性的 AHK 脚本执行"截图/点击"，前端只负责展示画面和收集点击坐标。
-
-> 演进说明：早期有基于像素颜色识别的"启动/停止/重新登录"按钮，但因花妖 UI 有持续动画、按钮颜色不稳定，自动识别经常误判。这些功能已**全部删除**，改为让用户通过操控画面直接点击操作，更直观可靠。当前**只保留远程操控这一个核心功能**。
+技术栈：Node.js 原生 `http` 后端 + 单文件 HTML5 前端。运行时依赖仅 3 个且全部预编译：`koffi`（Win32 API 调用）、`node-screenshots`（窗口截图）、`yauzl`（纯 Node ZIP 解压，用于花妖更新）。UIA 能力一律通过**系统自带 PowerShell + .NET UIA** 实现，**禁止引入任何编译型/原生依赖**（项目原则：简洁优先，用户明确裁定）。
 
 ## 常用命令
 
-- **启动服务**：`npm start`（等价于 `node start.js`）。`start.js` 会检测是否管理员，非管理员在 Windows 下弹 UAC 提权后以管理员重新启动（因为更新花妖写防火墙规则需要管理员权限），之后加载 `server.js`。监听 `0.0.0.0:13000`（可用 `.env` 或环境变量 `PORT`/`HOST` 覆盖），浏览器访问 `http://localhost:13000`。首次部署需 `npm install` 安装 `yauzl`（其余逻辑零依赖）。本地配置统一放 `.env`（零依赖加载器，已被 .gitignore 排除），模板见 `.env.example`。
-- **无测试、无 Lint、无构建步骤**：前端是纯静态 `index.html`，后端用 Node 原生 `http` 模块，唯一第三方依赖 `yauzl`（解压 zip）。
-- **改代码后需重启服务才生效**：结束旧 node 进程（`Get-CimInstance Win32_Process -Filter "Name='node.exe'"` 找到 server.js/start.js 的 PID，`Stop-Process`）再 `npm start`。
-- **手动运行 AHK 脚本调试**：可 `AutoHotkey.exe control-shot.ahk` 单独跑，脚本会把结果写入 `screenshots/` 下的 JSON，方便检查。
+- **启动服务**：`npm start`（等价 `node start.js`）。`start.js` 检测管理员权限，非管理员弹 UAC 提权重启（更新花妖写防火墙规则需要），然后加载 `server.js`。监听 `0.0.0.0:13000`，`.env` 可覆盖 `PORT`/`HOST`。首次部署 `npm install`。
+- **无测试、无 Lint、无构建步骤**。改代码后需重启 node 进程才生效。
+- **调试**：`logs/control.log`（已 gitignore）记录每次 click/input/shot 的坐标、耗时、结果与安全闸判定，是远程排查的第一入口；默认全量记录，`.env` 设 `CONTROL_LOG=0` 切静默模式（仅失败/拦截），超 1MB 自动滚动。调试协作模式：加日志 → 用户浏览器真实操作 → 读日志定位。
 
 ## 架构
 
-### 三层协作模型（重点）
+### capture.js —— 后台操控核心（koffi/Win32）
 
-核心架构是 **Node.js 后端 ↔ 文件系统 ↔ AHK 脚本** 的松耦合协作，没有共享内存或 IPC，一切状态通过文件传递：
+窗口与消息层的全部能力都在这里，服务器无状态调用：
 
-1. **Node.js 后端 (`server.js`)** 提供 REST API，收到请求后 `spawn` 一个对应的 AHK 脚本，等待进程退出后读取结果文件拼装响应。
-2. **AHK 脚本** 执行真实窗口操作（截图 / 点击），结束前把窗口矩形和操作结果写入 `screenshots/control-meta.json`（截图写入 `screenshots/control.png`）。
-3. **后端读取 meta 文件**，返回给前端。AHK 写的 JSON 带 UTF-8 BOM，后端 `readControlMeta` 先剥离 `\uFEFF` 再 `JSON.parse`。
+- `getWindow()`：定位花妖顶层窗口（标题 `"花妖"`，按进程/窗口匹配），带缓存，`invalidate()` 失效。
+- `findRenderWidgetHwnd(hwnd)`：递归找 WebView2 渲染子窗口（类名 `Chrome_RenderWidgetHostHWND`）——**消息点击/键盘的唯一正确投递目标**，直接发主窗口对 WebView2 无效。
+- `clientOrigin(hwnd)`：`ClientToScreen` 求客户区原点。**必须传具体 hwnd**，漏传会得到 (0,0) 导致坐标全错（历史 bug）。
+- `clientClick(sx, sy)`：把截图像素坐标换算为 RWH 客户区坐标后 `PostMessage` 投递鼠标消息（MOUSEMOVE/BUTTONDOWN/BUTTONUP）。后台可送达，不移动真实鼠标、不抢焦点。
+- `captureFrame()`：按窗口抓帧（PrintWindow 路线，node-screenshots）。RDP 最小化后 Windows 挂起屏幕渲染，抓屏幕必黑，**按窗口抓取不受影响**。
+- `sendTextInput(sx, sy, text, append)`：**纯消息文本输入（v3，当前方案）**——消息点击定位光标 → append：END 键移到末尾；clear：三击全选（第 2/3 击用 `WM_LBUTTONDBLCLK`，间隔须在双击窗口内）→ 逐字符 `WM_CHAR`。毫秒级、不依赖系统焦点、任何遮挡状态不受影响。
 
-关键点：**AHK 脚本是"一次性执行"的**（`#SingleInstance Off`，跑完即退出），每次 API 调用都重新 spawn 一个新进程。后端用 30 秒超时兜底，避免脚本卡死导致请求挂起。脚本 `#Include garden-lib.ahk`，库内部自动 `#Include image-put.ahk`。
+**消息输入的边界（实测结论，勿走回头路）**：
+- `WM_CHAR` 打字有效（Unicode 码点直发，中文 OK）；但退格/Ctrl+A/Shift+Home 等**编辑控制键消息 Chromium 不认**（`WM_KEYDOWN`、`WM_CHAR 0x08` 均无效），所以 clear 靠三击全选覆盖，不能靠键盘删除。
+- 后台 `PostMessage` 点击**不会转移系统焦点**（前台窗口不变，UIA `FocusedElement` 永远指向前台），但 WebView2 处理投递消息不需要系统焦点。
+- UIA `ValuePattern.SetValue` 写值可用但有两个代价：窗口被完全遮挡时渲染节流导致 **~2s 确认等待**，且 Chromium 会自己激活抢前台（无法从后台进程阻止/归还）。当前架构仅在将来需要兜底时才考虑，正常路径零 UIA 写操作。
 
-### API（全部为远程操控相关）
+### uia-probe.js —— 输入前安全闸（PowerShell/只读 UIA）
 
-- `POST /api/control/shot` → 运行 `control-shot.ahk`，把花妖窗口置于前台并截图。截图前会先 `ensureGardenRunning()`：按**当前版本 exe 完整路径精确匹配**检测运行情况——当前版本没在运行（被杀/退出）或跑的是其他旧版本时，结束旧进程并重新启动 `version.json` 记录的当前版本 exe，保证操控的始终是最新版（进程路径匹配 + 服务端锁防重复启动）；等待窗口就绪后截图，响应带 `autoStarted`/`ensureError` 字段供前端提示。**未安装兜底**：花妖从未安装（无版本记录）或当前版本 exe 文件丢失时，不做无意义的截图（AHK 必然失败且提示误导），直接返回 `{ok:false, notInstalled:true, reason:'no_record'|'exe_missing', message}` 供前端展示安装引导；版本记录丢失但花妖进程仍在运行时按降级模式放行截图（`degraded`）。
-- `POST /api/control/restart` → 重启花妖：`killGardenProcesses()` 结束进程 → 等 600ms → `ensureGardenRunning()` 启动当前版本并等待窗口就绪。前端顶栏「⏻」按钮调用，成功后自动刷新画面。未安装/程序文件丢失时拒绝重启（不执行 kill），返回 `notInstalled` 标记，前端提示并自动打开安装面板——程序文件丢失但进程还在跑时尤其要避免把唯一实例杀掉后无法恢复。
-- `POST /api/control/click` → 接收 `{x, y}`（截图像素坐标），运行 `control-click.ahk <x> <y>` 执行点击。
-- `POST /api/control/input` → 接收 `{x, y, text, clear}`（截图像素坐标 + 文本 + 是否清空），先把 `text` 写入 `screenshots/input-text.txt`（UTF-8 无 BOM，避免命令行转义），再运行 `control-input.ahk <x> <y> <clear>` 输入文本。
-- `GET /api/control/screenshot` → 返回最新 `control.png`。
-- `GET /api/garden/update` → 返回当前版本信息、更新历史、下载地址配置，并带 `installed`（当前版本 exe 是否真实存在）与 `installReason`（`ok`/`no_record`/`exe_missing`），前端据此区分"首次安装/重新安装/日常更新"语义。
-- `POST /api/garden/update` → 更新花妖程序。body 传 `{version:"1.5.1"}` 或 `{auto:true}`（自动推算下一版本，末位 +1）。流程：下载 zip → 校验 zip 文件头 → **用 yauzl 解压**（纯 Node 实现，不依赖系统 tar/powershell）到安装目录 `v<版本>/` → 定位主程序 → 结束后正在运行的花妖 → **预先用 `netsh advfirewall` 添加防火墙放行规则（避免首次启动弹 Windows"允许联网"对话框，需管理员权限）** → 启动主程序 → 等待窗口就绪 → 写 `version.json` 与 `update.log`。任一准备步骤失败时旧版花妖不受影响；启动阶段失败会尝试恢复旧版。
+`runUiaProbe(pid, px, py)`：判断屏幕坐标处是否为花妖的可输入控件，**只读不写、零消息、界面零扰动**。实现：spawn `powershell.exe -EncodedCommand`（UTF-16LE，不落盘，规避 PS5.1 无 BOM 读 UTF-8 中文乱码问题），脚本内 FromPoint 快路径（校验元素 PID 属花妖或 msedgewebview2 渲染进程）+ 全树"包含点且面积最小"搜索兜底，向上找可写 Value/Range 模式且控件类型限定 编辑/组合框/微调/文档（排除"切换"等自带可写空 Value 的非输入控件）。返回 `{editable, kind, controlType}` 或 `{unavailable}`；探测失败**放行**（可用性优先）。成本 ~700ms/次（PS 冷启动）。
 
-**坐标映射机制**：`control-shot.ahk` 把窗口矩形 `(x, y, w, h)` 写入 `control-meta.json`；前端拿到矩形后在截图内计算点击的"截图像素坐标"并传给后端；`control-click.ahk` 重新读取窗口位置，把截图像素坐标减去客户区原点偏移（标题栏/边框）换算为窗口客户区坐标，再用 `ControlClick(NA)` 向窗口投递消息点击，随后自动重新截图形成"所见即所得"反馈闭环。因此**窗口移动不影响坐标映射正确性**；且不移动真实鼠标、不要求窗口前台——**远程桌面最小化/窗口被遮挡时截图(PrintWindow)与点击(ControlClick)均正常工作**（2026-09-05 实测；模拟真实鼠标在 RDP 最小化时会失效，故弃用。裸 PostMessage 主窗口/子窗口对 WebView2 均无效，勿改用）。
+### server.js —— HTTP 服务与花妖生命周期
 
-### 前端（index.html）
+- `POST /api/control/shot`：确保花妖在运行（`ensureGardenRunning`：当前版本 exe 路径精确匹配，异常时重启；未安装返回 `notInstalled` 供前端安装引导）→ 抓帧落盘 `screenshots/control.png` → 返回窗口矩形。
+- `POST /api/control/click`：`{x,y}`（截图像素坐标）→ `clientClick` → 250ms 后自动重截图，形成"所见即所得"闭环。窗口移动不影响映射（每次实时求原点）。
+- `POST /api/control/input`：`{x,y,text,clear}` → **先跑安全闸**（`uia-probe`，不可编辑则拒绝且一个消息都不发）→ `sendTextInput` → 重截图反馈。
+- `POST /api/control/restart` / `GET|POST /api/garden/update`：重启与版本更新（下载 zip → yauzl 校验解压 → `netsh advfirewall` 预放行防火墙 → 拉起 → 写 `hua-yao/version.json`；启动失败回滚旧版）。
+- 操作日志 `logControl()` → `logs/control.log`；配置项见 `.env.example`（`GARDEN_DOWNLOAD_URL` 无默认值，真实下载源属敏感信息不入库）。
 
-单文件内联 CSS/JS，**移动优先 (mobile-first)**，打开即进入操控界面。核心是**双模式**（底部按钮 `modeBtn` 切换，`applyMode()` 统一处理）：
+### index.html —— 前端（单文件内联）
 
-- **直接点击模式（默认）**：单指轻点画面 = 立即点击花妖（tap 且无移动才触发）；双指捏合 = 缩放。
-- **手动点击模式**：单指拖动 = 移动绿色虚拟光标（1:1 图像像素，`moveCursorTo` 裁剪边界）；底部大「点击」按钮在光标位置确认发送 `/api/control/click`；光标含坐标标签（画面→屏幕）。
-- **缩放平移实现**：CSS `transform` + `transform-origin:0 0`，`renderInfo()` 统一计算映射，捏合中心缩放保持画面点不动。
-- **桌面增强**（检测到 `hover+pointer:fine` 时启用）：鼠标悬停=光标跟随（手动模式）或更新位置提示（直接模式）、单击=直接点击、滚轮缩放、按住拖动平移。桌面端默认直接模式单击即点。
-- **文本输入**：底部第二行常驻「⌨ 输入」按钮。点击画面（`doClick`）时把截图像素坐标存入 `target` 作为"目标输入框"依据；点「输入」弹出底部输入面板（textarea 自动聚焦唤起系统键盘），回车/软键盘发送键确认、Shift+回车换行、可选"发送前清空"开关（默认追加）。发送走 `POST /api/control/input`，成功后面板关闭并刷新画面。键盘弹出时用 `visualViewport` 把面板顶到键盘上方（iOS 适配）。
-- 状态信息只显示**非花妖状态**（截图是否成功、窗口矩形、光标坐标），不判断花妖运行状态。移动端用 toast 提示，桌面端用状态栏。
-- **未安装引导**：截图接口返回 `notInstalled` 时，画面区显示引导卡 `setupCard`（区分"尚未安装"与"程序文件丢失"两种文案/图标，内联 lucide 风格 SVG），按钮跳转更新面板；面板按 `installed`/`installReason` 动态切换标题与按钮文案（安装花妖/重新安装花妖/更新花妖版本），未安装时禁用"自动下一版本"（无当前版本可推算），下载源未配置时引导卡上直接禁用安装按钮并提示配置 `.env`。
+移动优先双模式（直接点击/手动瞄准光标）、双指捏合缩放平移、文本输入面板（`visualViewport` 适配软键盘）、未安装引导卡。坐标全部使用"截图像素坐标"，由后端换算为屏幕/RWH 客户区坐标。
 
-### 文件职责
+## 关键约束
 
-- `server.js`：HTTP 服务器 + 零依赖 `.env` 加载器 + AHK 定位（优先 `AHK_EXE` 环境变量，回退常见安装路径）+ 子进程管理 + 3 个操控 API + 花妖更新（下载/校验/yauzl 解压/防火墙/拉起）。可配置项：`PORT`/`HOST`/`AHK_EXE`/`GARDEN_DOWNLOAD_URL` 等。花妖窗口标题(`"花妖"`)与标准尺寸(406x883)为固定常量，硬编码于脚本中，不做外部化。
-- `index.html`：全屏操控界面（内联 CSS/JS），缩放/平移/准星/方向键微调等交互都在此实现。
-- `garden-lib.ahk`：公共库 —— `LogMsg`/`ResetLog`/`ShowBigLabel`/`CaptureRectToFile`/`SaveControlScreenshot`/`WriteControlMeta`/`EnsureHuaYaoWindow` 等工具函数。`EnsureHuaYaoWindow` 统一处理花妖窗口可见性：开启 `DetectHiddenWindows` 匹配托盘隐藏窗口、`WinShow`/`WinRestore` 恢复显示，矩形无效(0x0，Tauri 隐藏恢复后位置丢失)时自动 `WinMove` 重定位到屏幕居中(406x883)，全程 try/catch 失败返回友好提示而非报错中断。三个控制脚本(shot/click/input)均调用它。还残留 `ScanColorBlocks`/`CaptureRectToFile` 等旧状态识别的死代码（无调用方，可安全删除，不影响功能）。`SaveControlScreenshot` 用 `PrintWindow(PW_RENDERFULLCONTENT)`（flag 0x2，整窗含标题栏，尺寸=窗口矩形）直接抓花妖窗口而非抓屏幕：远程桌面窗口最小化后 Windows 挂起会话的屏幕渲染，抓屏幕必然全黑，而窗口内容不依赖屏幕合成仍可正常截图（2026-09-05 实测验证）；HBITMAP 编码存盘仍交给 ImagePut。勿改用 ImagePut.WindowToBitmap（0x3 仅客户区会破坏前端坐标映射，且其 PostMessage 权限探测在非提权环境会误报）。截图脚本须提权运行（花妖进程为提权进程，由提权服务 spawn，天然满足）。
-- `control-shot.ahk`：把花妖窗口置于前台并截图，写 `control.png` + `control-meta.json`。
-- `control-click.ahk`：把截图像素坐标换算为窗口客户区坐标后用 `ControlClick(NA)` 投递消息点击（无需激活窗口、后台生效），点击后再截图反馈。
-- `control-input.ahk`：接收 `<sx> <sy> <clear>`，先点击目标坐标确保输入框焦点，再从 `input-text.txt` 读文本写入剪贴板后 `Ctrl+V` 粘贴（clear=1 先 `Ctrl+A` 全选覆盖，clear=0 先 `^{End}` 定位到末尾追加），最后截图反馈。文本输入依赖真实键盘注入，必须花妖在前台：激活后校验 `WinActive`，未在前台（如 RDP 最小化）时拒绝输入并提示，防止键盘事件误伤其他前台程序；后台文本输入需 CDP 方案，暂未实施。
-- `image-put.ahk`：第三方库（上游名为 `ImagePut.ahk`），用于精确截图和 GDI+ 操作，勿修改。同步上游更新时注意替换回原名。
-- `status.json` / `screenshots/`：运行时生成的状态与截图文件（前端已不读 `status.json`）。
-- `hua-yao/`：花妖程序安装目录（下载解压产物，已 .gitignore）。内含 `version.json`（版本信息）与 `update.log`（更新日志）。
-
-### 版本更新可配置项（`.env`）
-
-- `GARDEN_DOWNLOAD_URL`：完整下载地址，`{v}` 占位替换为目标版本号。**无默认值**——真实 CDN 地址属敏感信息，代码与模板均不内置，必须由用户在本地 `.env` 自行配置；未配置时更新功能不可用（前端面板会提示、`POST` 接口返回错误）。
-- `GARDEN_INSTALL_DIR`：安装目录，默认项目下 `hua-yao/`。
-- `GARDEN_EXE_NAME`：解压后要启动的主程序名（`{v}` 占位替换为目标版本号），默认 `garden-v{v}-x64.exe`（找不到时回退到目录内任意 `.exe`）。运行进程结束按 `GARDEN_EXE_NAME` 的 `{v}` 前缀匹配（如 `garden-v` 覆盖 `garden-v1.4.9-x64`）。
-
-### 环境要求
-
-- AutoHotkey v2（脚本第一行 `#Requires AutoHotkey v2.0`）。后端启动时探测 AHK，找不到则截图/操控功能不可用（页面仍能打开并提示）。
-- 目标游戏窗口标题固定为 `"花妖"`，尺寸通常为 406x883。
-- `index.html` 与 `server.js` 中的路径基于 `__dirname` / `A_ScriptDir`，不要改变脚本/页面文件与 `screenshots/` 的相对位置。
+- 花妖窗口标题固定 `"花妖"`（客户端区约 390x844）；`hua-yao/` 为安装目录（gitignored）。
+- `.codebuddy/`、`logs/`、`screenshots/`、`.env`、`hua-yao/` 均已 gitignore；**绝不提交任何真实下载源/凭证/运行时截图**。
+- 依赖保持最小集（koffi/node-screenshots/yauzl），新增能力优先考虑"系统能力 + 消息机制"，引入新 npm 依赖或任何需要编译的东西前必须与用户确认。

@@ -8,6 +8,11 @@
   },
   "private": true,
   "dependencies": {
+    "koffi": "^3.2.1",
+    "node-screenshots": "^0.2.8",
     "yauzl": "^2.10.0"
+  },
+  "allowScripts": {
+    "koffi@3.2.1": true
   }
 }

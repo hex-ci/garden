@@ -6,6 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process');
 const yauzl = require('yauzl'); // 纯 Node ZIP 解压, 不依赖系统 tar/powershell
+const capture = require('./capture');
 
 const ROOT = __dirname;
 
@@ -24,11 +25,31 @@ function loadEnvFile() {
     }
   } catch { /* .env 加载失败不影响启动 */ }
 }
+
 loadEnvFile();
 
 const HOST = process.env.HOST || '0.0.0.0';
 const PORT = Number(process.env.PORT) || 13000;
 const SCREENSHOTS_DIR = path.join(ROOT, 'screenshots');
+// 控制操作日志: 记录每次点击/输入/截图请求与结果, 供远程调试真实用户操作
+// .env 可配 CONTROL_LOG=0 进入静默模式(仅记录失败与安全闸拦截), 默认 1=全量记录
+const CONTROL_LOG = path.join(ROOT, 'logs', 'control.log');
+const CONTROL_LOG_VERBOSE = (process.env.CONTROL_LOG ?? '1') !== '0';
+function logControl(msg) {
+  try {
+    if (!CONTROL_LOG_VERBOSE && !/FAIL|unavailable|reject|error/i.test(msg)) return;
+    fs.mkdirSync(path.dirname(CONTROL_LOG), { recursive: true });
+    if (fs.existsSync(CONTROL_LOG) && fs.statSync(CONTROL_LOG).size > 1024 * 1024) {
+      fs.writeFileSync(CONTROL_LOG, new Date().toISOString() + ' (rotated: 1MB cap)\n');
+    }
+    fs.appendFileSync(CONTROL_LOG, new Date().toISOString().slice(11, 23) + ' ' + msg + '\n');
+  } catch { }
+}
+
+// ---- UIA 只读探测: 判断屏幕坐标处是否为可输入框 (发送前安全闸, 防止消息误伤界面) ----
+// UIA 只读探测走 PowerShell 路线 (uia-probe.js): 系统自带 PS + .NET UIA, EncodedCommand 投递,
+// 零编译/零外部依赖。只读不写, 探测失败/超时 => 放行(可用性优先)。
+const { runUiaProbe } = require('./uia-probe');
 const INDEX_FILE = path.join(ROOT, 'index.html');
 
 // ---- 花妖程序更新(可配置, 地址可能随 CDN 变动而改) ----
@@ -45,48 +66,21 @@ const GARDEN_LOG_FILE = path.join(GARDEN_INSTALL_DIR, 'update.log');
 // 从 exe 名模板推导进程名前缀(用于匹配带版本号的运行进程): "garden-v{v}-x64.exe" -> "garden-v"
 const GARDEN_PROC_PREFIX = GARDEN_EXE_NAME.split('{v}')[0].toLowerCase();
 
-// ---- 定位 AutoHotkey 可执行文件 ----
-const AHK = (function findAhk() {
-  const candidates = [
-    process.env.AHK_EXE,
-    'autohotkey',
-    'AutoHotkey',
-    'C:\\Program Files\\AutoHotkey\\v2\\AutoHotkey.exe',
-    'C:\\Program Files (x86)\\AutoHotkey\\v2\\AutoHotkey.exe',
-  ].filter(Boolean);
-  for (const c of candidates) {
-    try {
-      const r = spawnSync(c, ['/ErrorStdOut'], { windowsHide: true, timeout: 5000 });
-      if (r.error && r.error.code === 'ENOENT') continue;
-      return c;
-    } catch {
-      continue;
-    }
-  }
-  return null;
-})();
-
-// ---- 远程操控模式: 截图 + 坐标点击 ----
+// ---- 远程操控模式: 窗口抓帧 + 消息点击 + 消息文本输入（原生模块, 见 capture.js）----
 const CONTROL_IMG = path.join(SCREENSHOTS_DIR, 'control.png');
-const CONTROL_META = path.join(SCREENSHOTS_DIR, 'control-meta.json');
-const CONTROL_TEXT = path.join(SCREENSHOTS_DIR, 'input-text.txt'); // 文本输入: 后端写、AHK 读的临时文本文件
 
 if (!fs.existsSync(SCREENSHOTS_DIR)) fs.mkdirSync(SCREENSHOTS_DIR, { recursive: true });
 
-function readControlMeta() {
-  try {
-    let raw = fs.readFileSync(CONTROL_META, 'utf8');
-    if (raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1); // 去掉 AHK 写入的 UTF-8 BOM
-    return JSON.parse(raw);
-  } catch {
-    return null;
-  }
-}
-
-function controlShotState() {
-  let mtimeMs = 0;
-  try { mtimeMs = fs.statSync(CONTROL_IMG).mtimeMs; } catch { /* ignore */ }
-  return { meta: readControlMeta(), mtimeMs, hasImage: mtimeMs > 0 };
+// 抓帧并落盘 control.png, 返回 { rect: {x,y,w,h}, mtimeMs, size }
+async function captureToDisk() {
+  const frame = await capture.captureFrame();
+  fs.writeFileSync(CONTROL_IMG, frame.png);
+  const mtimeMs = fs.statSync(CONTROL_IMG).mtimeMs;
+  return {
+    rect: { x: frame.origin.x, y: frame.origin.y, w: frame.width, h: frame.height },
+    mtimeMs,
+    size: frame.png.length,
+  };
 }
 
 function readJsonBody(req) {
@@ -102,47 +96,6 @@ function readJsonBody(req) {
     });
     req.on('error', () => resolve({}));
   });
-}
-
-const children = [];
-// 运行 AHK 脚本,返回的 Promise 在脚本进程退出后 resolve
-function runAhk(scriptName, args = []) {
-  return new Promise((resolve) => {
-    if (!AHK) { resolve(false); return; }
-    const child = spawn(AHK, [path.join(ROOT, scriptName), ...args], { windowsHide: true });
-    children.push(child);
-    let settled = false;
-    let timer = null;
-    const done = (ok) => {
-      if (settled) return;
-      settled = true;
-      if (timer) clearTimeout(timer);
-      const i = children.indexOf(child);
-      if (i >= 0) children.splice(i, 1);
-      resolve(ok);
-    };
-    child.on('error', () => done(false));
-    child.on('exit', () => done(true));
-    // 安全超时:避免脚本异常卡死导致请求永久挂起
-    timer = setTimeout(() => done(true), 30000);
-  });
-}
-
-// 统一的操控动作处理: 运行 AHK 脚本 -> 读取最新窗口矩形与截图 -> 返回前端所需信息
-async function controlAction(res, script, args, extra) {
-  const ok = await runAhk(script, args);
-  const st = controlShotState();
-  const meta = st.meta || {};
-  const body = {
-    ok,
-    ahkAvailable: !!AHK,
-    message: meta.message || (ok ? '操作完成' : '操作失败'),
-    rect: meta.w ? { x: meta.x, y: meta.y, w: meta.w, h: meta.h } : null,
-    screenshot: st.hasImage ? { mtimeMs: st.mtimeMs } : null,
-    ...(extra || {}),
-  };
-  res.writeHead(ok ? 200 : 500, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
-  res.end(JSON.stringify(body));
 }
 
 // ===== 花妖程序更新 =====
@@ -596,10 +549,9 @@ const server = http.createServer(async (req, res) => {
 
   // ---- 远程操控模式(主功能) ----
   if (req.method === 'GET' && url === '/api/control/screenshot') {
-    const st = controlShotState();
-    if (!st.hasImage) {
+    if (!fs.existsSync(CONTROL_IMG)) {
       res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
-      return res.end(JSON.stringify({ error: 'no control screenshot', message: st.meta ? st.meta.message : '暂无截图' }));
+      return res.end(JSON.stringify({ error: 'no control screenshot', message: '暂无截图' }));
     }
     return serveFile(res, CONTROL_IMG, 'image/png');
   }
@@ -607,13 +559,11 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'POST' && url === '/api/control/shot') {
     // 刷新前先确保花妖在运行(被杀/退出后自动拉起, 进程检测防重复启动)
     const ensured = await ensureGardenRunning();
-    // 花妖未安装/程序文件丢失: 截图必然失败且 AHK 提示有误导性,
-    // 直接返回结构化标记, 由前端展示"下载安装"引导, 不再白跑截图脚本
+    // 花妖未安装/程序文件丢失: 直接返回结构化标记, 由前端展示"下载安装"引导
     if (ensured.notInstalled) {
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
       return res.end(JSON.stringify({
         ok: false,
-        ahkAvailable: !!AHK,
         notInstalled: true,
         reason: ensured.reason,
         message: ensured.error,
@@ -624,10 +574,23 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
       return res.end(JSON.stringify({ ok: false, autoStarted: true, message: '花妖正在启动，请稍后再刷新画面' }));
     }
-    const extra = {};
-    if (ensured.started) extra.autoStarted = true;
-    else if (ensured.error) extra.ensureError = ensured.error;
-    return controlAction(res, 'control-shot.ahk', [], extra);
+    try {
+      const ts0 = Date.now();
+      const cap = await captureToDisk();
+      logControl(`shot ok capMs=${Date.now() - ts0} rect=${cap.rect.x},${cap.rect.y} ${cap.rect.w}x${cap.rect.h}`);
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+      return res.end(JSON.stringify({
+        ok: true,
+        message: '画面已刷新',
+        rect: cap.rect,
+        screenshot: { mtimeMs: cap.mtimeMs },
+        ...(ensured.started ? { autoStarted: true } : {}),
+        ...(ensured.error ? { ensureError: ensured.error } : {}),
+      }));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+      return res.end(JSON.stringify({ ok: false, message: '截图失败: ' + e.message }));
+    }
   }
 
   // 重启花妖: 结束进程后重新启动当前版本(复用 killGardenProcesses + ensureGardenRunning)
@@ -649,6 +612,7 @@ const server = http.createServer(async (req, res) => {
     const killed = killGardenProcesses();
     await sleep(600); // 等进程退出、文件句柄释放
     const ensured = await ensureGardenRunning();
+    capture.invalidate(); // 花妖重启后窗口句柄变化, 强制重新查找
     if (ensured.error) {
       res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
       return res.end(JSON.stringify({ ok: false, message: ensured.error }));
@@ -674,7 +638,25 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
       return res.end(JSON.stringify({ ok: false, error: 'invalid coords', message: '坐标参数无效' }));
     }
-    return controlAction(res, 'control-click.ahk', [String(x), String(y)]);
+    try {
+      // 消息点击(后台可送达), 稍候让界面响应后抓帧反馈
+      const t0 = Date.now();
+      capture.clientClick(x, y);
+      await sleep(150);
+      const cap = await captureToDisk();
+      logControl(`click(${x},${y}) ok total=${Date.now() - t0}ms`);
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+      return res.end(JSON.stringify({
+        ok: true,
+        message: '已点击 (' + x + ',' + y + ')',
+        rect: cap.rect,
+        screenshot: { mtimeMs: cap.mtimeMs },
+      }));
+    } catch (e) {
+      logControl(`click(${x},${y}) FAIL ${e.message}`);
+      res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+      return res.end(JSON.stringify({ ok: false, message: '点击失败: ' + e.message }));
+    }
   }
 
   if (req.method === 'POST' && url === '/api/control/input') {
@@ -693,16 +675,41 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
       return res.end(JSON.stringify({ ok: false, error: 'text too long', message: '文本过长(最多 2000 字符)' }));
     }
-    // clear: 兼容布尔 true/false 与字符串 "1"/"0"
+    // clear: 兼容布尔 true/false 与字符串 "1"/"0"; clear=true 覆盖原内容, 否则追加
     const clear = body.clear === true || body.clear === '1' || body.clear === 1;
-    // 文本走临时文件传递, 避免命令行参数对中文/换行/引号的转义问题
     try {
-      fs.writeFileSync(CONTROL_TEXT, body.text, 'utf8'); // UTF-8 无 BOM
+      const t0 = Date.now();
+      // 发送前安全闸: 只读探测点击处是否为可输入框(不是则一个消息都不发, 界面零扰动)
+      const w = capture.getWindow();
+      if (!w) throw new Error('未找到花妖窗口');
+      const origin = capture.clientOrigin(w.hwnd);
+      const pid = capture.getTargetPid();
+      const probe = await runUiaProbe(pid, origin.x + x, origin.y + y);
+      if (probe.unavailable) {
+        logControl(`input(${x},${y}) probe unavailable: ${probe.error || 'unknown'} (fail-open)`);
+      } else if (!probe.editable) {
+        logControl(`input(${x},${y}) gate reject kind=${probe.kind} type=${probe.controlType}`);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+        return res.end(JSON.stringify({ ok: false, message: '点击位置不是可输入框，未发送' }));
+      }
+      // 纯消息文本输入(点击+END/三击全选+WM_CHAR), 后台可送达, 不抢系统焦点
+      await capture.sendTextInput(x, y, body.text, !clear);
+      await sleep(250);   // 让渲染器消化输入后再抓帧反馈
+      const t1 = Date.now();
+      const cap = await captureToDisk();
+      logControl(`input(${x},${y}) clear=${clear} ok msg total=${Date.now() - t0}ms capMs=${Date.now() - t1}`);
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+      return res.end(JSON.stringify({
+        ok: true,
+        message: '文本已发送' + (clear ? '(已清空)' : ''),
+        rect: cap.rect,
+        screenshot: { mtimeMs: cap.mtimeMs },
+      }));
     } catch (e) {
-      res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ ok: false, message: '写入文本文件失败: ' + e.message }));
+      logControl(`input(${x},${y}) FAIL ${e.message}`);
+      res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+      return res.end(JSON.stringify({ ok: false, message: '文本输入失败: ' + e.message }));
     }
-    return controlAction(res, 'control-input.ahk', [String(x), String(y), clear ? '1' : '0']);
   }
 
   // ---- 花妖程序更新 ----
@@ -749,11 +756,9 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, HOST, () => {
   console.log('花妖操控台已启动 ->  http://' + (HOST === '0.0.0.0' ? 'localhost' : HOST) + ':' + PORT);
-  if (!AHK) console.log('警告: 未检测到 AutoHotkey，截图/操控功能将不可用。');
 });
 
 function shutdown() {
-  for (const c of children) { try { c.kill(); } catch { /* ignore */ } }
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 1000);
 }
