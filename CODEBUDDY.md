@@ -9,7 +9,7 @@
 ## 目录结构
 
 ```
-server/   后端: server.js(HTTP+API) / capture.js(抓帧+消息交互) / live.js(WS 实时画面) / uia-probe.js(PS 探测) / start.js(UAC 提权入口)
+server/   后端: server.js(HTTP+API) / capture.js(抓帧+消息交互) / live.js(WS 实时画面) / uia-probe.js+uia-probe.ps1(UIA 探测) / start.js(UAC 提权入口)
 public/   前端: index.html(结构) / css/style.css(样式) / js/app.js(逻辑), 由 server 静态托管(/css/*, /js/*)
 data/     本地运行时数据(gitignored): garden/(花妖安装目录, 含 version.json) + logs/control.log
 docs/     文档图片
@@ -39,9 +39,11 @@ docs/     文档图片
 - 后台 `PostMessage` 点击**不会转移系统焦点**（前台窗口不变，UIA `FocusedElement` 永远指向前台），但 WebView2 处理投递消息不需要系统焦点。
 - UIA `ValuePattern.SetValue` 写值可用但有两个代价：窗口被完全遮挡时渲染节流导致 **~2s 确认等待**，且 Chromium 会自己激活抢前台（无法从后台进程阻止/归还）。当前架构仅在将来需要兜底时才考虑，正常路径零 UIA 写操作。
 
-### uia-probe.js —— 输入前安全闸（PowerShell/只读 UIA）
+### uia-probe.js + uia-probe.ps1 —— 输入前安全闸（PowerShell/只读 UIA）
 
-`runUiaProbe(pid, px, py)`：判断屏幕坐标处是否为花妖的可输入控件，**只读不写、零消息、界面零扰动**。实现：spawn `powershell.exe -EncodedCommand`（UTF-16LE，不落盘，规避 PS5.1 无 BOM 读 UTF-8 中文乱码问题），脚本内 FromPoint 快路径（校验元素 PID 属花妖或 msedgewebview2 渲染进程）+ 全树"包含点且面积最小"搜索兜底，向上找可写 Value/Range 模式且控件类型限定 编辑/组合框/微调/文档（排除"切换"等自带可写空 Value 的非输入控件）。返回 `{editable, kind, controlType}` 或 `{unavailable}`；探测失败**放行**（可用性优先）。成本 ~700ms/次（PS 冷启动）。
+`runUiaProbe(pid, px, py)`：判断屏幕坐标处是否为花妖的可输入控件，**只读不写、零消息、界面零扰动**。实现：JS 薄封装 spawn `powershell.exe -File uia-probe.ps1 -TargetPid n -Px n -Py n`（**ps1 是独立脚本文件，可用 -File 直接手跑调试**），脚本内 FromPoint 快路径（校验元素 PID 属花妖或 msedgewebview2 渲染进程）+ 全树"包含点且面积最小"搜索兜底，向上找可写 Value/Range 模式且控件类型限定 编辑/组合框/微调/文档（排除"切换"等自带可写空 Value 的非输入控件）。返回 `{editable, kind, controlType}` 或 `{unavailable}`；探测失败**放行**（可用性优先）。成本 ~700ms/次（PS 冷启动）。
+
+**ps1 文件必须保存为带 BOM 的 UTF-8**（含中文注释；PS5.1 把无 BOM UTF-8 按 GBK 解析会静默炸）。参数名用 `-TargetPid` 而非 `-Pid`（$PID 是 PS 保留自动变量）。
 
 ### server.js —— HTTP 服务与花妖生命周期
 
