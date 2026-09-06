@@ -4,9 +4,6 @@ import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { GARDEN_INSTALL_DIR, GARDEN_PROC_PREFIX, GARDEN_VERSIONS_FILE } from './config.js';
 
-// 精确进程名兜底(不含版本号的老式命名), 带版本号的主进程走 GARDEN_PROC_PREFIX 前缀匹配
-const GARDEN_PROC_NAMES = ['garden.exe', 'garden', 'hua-yao.exe', 'huayao.exe'];
-
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // 系统本地时间戳(跟随系统时区, 中国环境即东八区), 格式 YYYY-MM-DD HH:MM:SS
@@ -64,10 +61,8 @@ export function killGardenProcesses() {
       const m = line.match(/"([^"]+)\.exe"/i);
       if (!m) continue;
       const name = m[1].toLowerCase();
-      // 精确名兜底 + 前缀匹配(覆盖 garden-v1.4.9-x64 这类带版本号的进程名)
-      const isMatch = GARDEN_PROC_NAMES.includes(name) ||
-        (GARDEN_PROC_PREFIX && name.startsWith(GARDEN_PROC_PREFIX));
-      if (isMatch) {
+      // 前缀为空时跳过匹配(防止误杀全部进程)
+      if (GARDEN_PROC_PREFIX && name.startsWith(GARDEN_PROC_PREFIX)) {
         found.push(name);
         try { spawnSync('taskkill', ['/F', '/IM', `${name}.exe`], { windowsHide: true }); } catch { /* ignore */ }
       }

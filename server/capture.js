@@ -223,7 +223,6 @@ export {
   clientClick,
   clientOrigin,
   sendTextInput,
-  findRenderWidgetHwnd,
   getTargetPid,
   invalidate,
   getWindow,

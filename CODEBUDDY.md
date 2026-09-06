@@ -52,7 +52,7 @@ docs/     文档图片
 
 `app.listen()` 返回的 http.Server 直接交给 `initLive()` 挂 WS。业务能力全部在同级模块，路由内只做编排与响应。`/api/*` 统一挂 `Cache-Control: no-store`；兜底错误中间件处理 JSON 解析失败(400)与未捕获异常(500)。
 
-- `POST /api/control/shot`：确保花妖在运行（`ensureGardenRunning`：当前版本 exe 路径精确匹配，异常时重启；未安装返回 `notInstalled` 供前端安装引导）→ **内存抓帧不落盘** → 返回窗口矩形 + base64 PNG（`image` 字段，前端直接 `img.src='data:image/png;base64,'` 渲染，省一次 GET 往返）。`GET /api/control/screenshot` 返回最近一帧内存 PNG（`image/png`），便于浏览器直接打开调试。
+- `POST /api/control/shot`：确保花妖在运行（`ensureGardenRunning`：当前版本 exe 路径精确匹配，异常时重启；未安装返回 `notInstalled` 供前端安装引导）→ **内存抓帧不落盘** → 返回窗口矩形 + base64 PNG（`image` 字段，前端直接 `img.src='data:image/png;base64,'` 渲染，省一次 GET 往返）。
 - `POST /api/control/click`：`{x,y,noimg?}`（截图像素坐标）→ `clientClick` + `noteActivity()`。**noimg=true（实时模式）时跳过等待与抓帧直接秒回**（实测 ~40ms），画面由实时突发帧呈现；否则等待+重截图返回 image，形成"所见即所得"闭环。窗口移动不影响映射（每次实时求原点）。
 - `POST /api/control/input`：`{x,y,text,clear,noimg?}` → **先跑安全闸**（`uia-probe`，不可编辑则拒绝且一个消息都不发；**同点位结果缓存 4s**，命中时省去 ~700ms PS 冷启动，实测后续探测 3ms）→ `sendTextInput`（内置 ~0.5-0.7s 消息节奏等待）+ `noteActivity()`；noimg 时无截图返回，前端发送按钮显示"发送中…"加载态；否则重截图反馈。
 - `POST /api/control/restart` / `GET|POST /api/garden/update`：重启与版本更新（下载 zip → yauzl 校验解压 → `netsh advfirewall` 预放行防火墙 → 拉起 → 写 `data/garden/version.json`；启动失败回滚旧版）。

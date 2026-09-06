@@ -61,10 +61,8 @@ describe('操控 API', () => {
     gardenAvailable = true;
   });
 
-  it('GET /screenshot 依赖首帧: 200(image/png) 或 404(尚无截图)', async () => {
-    const r = await fetch(BASE + '/api/control/screenshot');
-    expect([200, 404]).toContain(r.status);
-    if (r.status === 200) expect(r.headers.get('content-type')).toContain('image/png');
+  it('未知 API 路径 404', async () => {
+    expect((await fetch(BASE + '/api/control/screenshot')).status).toBe(404);
   });
 
   it('click 坐标校验与 noimg 秒回', async () => {

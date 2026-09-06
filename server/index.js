@@ -16,16 +16,11 @@ app.use(express.json({ limit: '1mb' }));
 // 所有 API 响应禁用缓存, 避免浏览器缓存接口结果
 app.use('/api', (req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
 
-// 抓帧到内存(不落盘), 返回 { rect: {x,y,w,h}, png: Buffer };
-// 最近一帧保留在 lastShotPng, 供 GET /api/control/screenshot 直接查看
-let lastShotPng = null;
-// UIA 探测结果短时缓存: 同一窗口同一点位 4 秒内直接复用, 省去每次 ~700ms 的 PowerShell 冷启动
-// (输入文本常对同一输入框连续操作, 缓存命中时输入延迟减半; TTL 足够短, 界面变化导致误判的风险可忽略)
+// 抓帧到内存, 返回 { rect: {x,y,w,h}, png: Buffer }
 let probeCache = { key: '', at: 0, result: null };
 
 async function captureShot() {
   const frame = await capture.captureFrame();
-  lastShotPng = frame.png;
   return {
     rect: { x: frame.origin.x, y: frame.origin.y, w: frame.width, h: frame.height },
     png: frame.png,
@@ -33,12 +28,6 @@ async function captureShot() {
 }
 
 // ---- 操控 API ----
-// 最近一帧截图(内存直出)
-app.get('/api/control/screenshot', (req, res) => {
-  if (!lastShotPng) return res.status(404).json({ error: 'no control screenshot', message: '暂无截图' });
-  res.type('image/png').send(lastShotPng);
-});
-
 // 刷新画面: 确保花妖在运行(未安装/程序丢失返回引导标记)后抓帧
 app.post('/api/control/shot', async (req, res) => {
   const ensured = await ensureGardenRunning();

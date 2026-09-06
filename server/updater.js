@@ -123,7 +123,7 @@ export function findGardenExe(dir, ver) {
 
 // 预先添加 Windows 防火墙放行规则, 避免新版 exe 首次启动弹出"允许联网"对话框
 // 需要管理员权限; 失败返回 false(由调用方提示)
-export function addFirewallRule(exePath) {
+function addFirewallRule(exePath) {
   const ruleName = 'Garden HuaYao';
   try {
     // 先删除同名旧规则(可能不存在, 忽略), 再分别添加入站/出站允许规则
