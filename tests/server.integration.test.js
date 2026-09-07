@@ -7,7 +7,7 @@ import WebSocket from 'ws';
 const PORT = 13199;
 const BASE = `http://127.0.0.1:${PORT}`;
 let child;
-let gardenAvailable = false;   // /shot 成功即认为花妖可用
+let gardenAvailable = false;   // ensure 成功即认为花妖可用
 
 beforeAll(async () => {
   child = spawn(process.execPath, ['server/index.js'], {
@@ -49,28 +49,34 @@ describe('静态资源与路由', () => {
 });
 
 describe('操控 API', () => {
-  it('POST /shot 返回画面(花妖可用)或未安装引导', async () => {
-    const { data } = await j('/api/control/shot', {});
+  it('POST /api/garden/ensure 返回运行状态或未安装引导', async () => {
+    const { data } = await j('/api/garden/ensure', {});
     if (data.notInstalled) {
       expect(data.reason).toMatch(/no_record|exe_missing/);
       return;
     }
     expect(data.ok).toBe(true);
-    expect(data.image.length).toBeGreaterThan(1000);
-    expect(data.rect.w).toBeGreaterThan(0);
     gardenAvailable = true;
+  });
+
+  it('画面只走 WS: /api/control/shot 已移除', async () => {
+    expect((await fetch(BASE + '/api/control/shot', { method: 'POST' })).status).toBe(404);
+  });
+
+  it('click 不再随响应返回图片', async () => {
+    if (!gardenAvailable) return;
+    const { data } = await j('/api/control/click', { x: 2, y: 2 });
+    expect(data.ok).toBe(true);
+    expect(data.image).toBeUndefined();
   });
 
   it('未知 API 路径 404', async () => {
     expect((await fetch(BASE + '/api/control/screenshot')).status).toBe(404);
   });
 
-  it('click 坐标校验与 noimg 秒回', async () => {
-    const bad = await j('/api/control/click', { x: -1, y: 0, noimg: true });
+  it('click 坐标非法返回 400', async () => {
+    const bad = await j('/api/control/click', { x: -1, y: 0 });
     expect(bad.status).toBe(400);
-    if (!gardenAvailable) return;   // 花妖不可用时点击必失败, 不做进一步断言
-    const { data } = await j('/api/control/click', { x: 2, y: 2, noimg: true });
-    expect(data.ok).toBe(true);
   });
 
   it('input 安全闸拒绝非输入框点位', async () => {
@@ -106,5 +112,20 @@ describe('WS 实时画面', () => {
     try { ws.close(); } catch { /* ignore */ }
     expect(gotGear).toBe(true);
     if (gardenAvailable) expect(gotBinary).toBe(true);
+  });
+
+  it('首帧为全帧(flags&2), 画幅有效', async () => {
+    if (!gardenAvailable) return;
+    const ws = new WebSocket(`ws://127.0.0.1:${PORT}/api/live`);
+    const first = await new Promise((res, rej) => {
+      const t = setTimeout(() => rej(new Error('未收到二进制帧')), 8000);
+      ws.on('open', () => ws.send(JSON.stringify({ op: 'start', gear: 'fast' })));
+      ws.on('message', (data, isBinary) => { if (isBinary) { clearTimeout(t); res(Buffer.from(data)); } });
+      ws.on('error', rej);
+    });
+    try { ws.close(); } catch { /* ignore */ }
+    expect(first[0] & 2).toBeTruthy();                     // 无基准: 首帧必须是全帧
+    expect(first.readUInt16LE(9)).toBeGreaterThan(0);      // 帧头 w/h 恒为整幅画幅
+    expect(first.readUInt16LE(11)).toBeGreaterThan(0);
   });
 });

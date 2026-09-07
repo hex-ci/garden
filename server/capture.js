@@ -134,15 +134,6 @@ async function captureImage() {
   throw lastErr || new Error('截图失败');
 }
 
-// 抓帧编码为 PNG: 返回 { png: Buffer, width, height, origin: {x,y}, hwnd }
-async function captureFrame() {
-  const fr = await captureImage();
-  const png = await withTimeout(fr.img.toPng(), CAPTURE_TIMEOUT, '编码');
-  const buf = Buffer.isBuffer(png) ? png : Buffer.from(png.buffer ?? png);
-  if (buf.length < 1000) throw new Error('截图像素数据异常');
-  return { png: buf, width: fr.width, height: fr.height, origin: fr.origin, hwnd: fr.hwnd };
-}
-
 // 消息点击：sx/sy 为截图像素坐标（=客户区坐标）
 // 投递目标为 WebView2 渲染子窗口（已实测后台可送达；顶层窗口/浅层子窗口均无效）
 function clientClick(sx, sy) {
@@ -218,7 +209,6 @@ function sendTextInput(sx, sy, text, append) {
 }
 
 export {
-  captureFrame,
   captureImage,
   clientClick,
   clientOrigin,

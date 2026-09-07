@@ -14,15 +14,15 @@ server/   后端: index.js(Express 核心:路由/静态/WS 挂载) / capture.js(
           / config.js(.env 加载+常量) / logger.js(操作日志) / start.js(UAC 提权入口)
 public/   前端: index.html(结构) / css/style.css(样式) / js/app.js(逻辑), 由 express.static 托管(整目录, no-store)
 data/     本地运行时数据(gitignored): garden/(花妖安装目录, 含 version.json) + logs/control.log
-tests/    vitest 测试: 单元(版本工具/zip/exe 定位) + 集成(spawn 真实服务于 13199 端口)
+tests/    vitest 测试(58 例): 单元(版本工具/zip/exe 定位/live diff) + 前端(从 app.js 截取真实函数执行) + 协议一致性(后端真实帧→前端真实解析) + 档位/空闲回归 + 集成(spawn 真实服务于 13199 端口); helpers/(前端源码截取 + live 脚手架)
 docs/     文档图片
 ```
 
 ## 常用命令
 
 - **启动服务**：`npm start`（等价 `node server/start.js`）。`start.js` 检测管理员权限，非管理员弹 UAC 提权重启（更新花妖写防火墙规则需要），然后加载 `server/index.js`。监听 `0.0.0.0:13000`，`.env` 可覆盖 `PORT`/`HOST`。首次部署 `npm install`。
-- **无构建步骤；有 Lint 与测试**：`npm run lint`（ESLint 9 + `eslint.config.js`）——**每次改代码后必须清零**；`npm test`（vitest，tests/ 下 24 用例：版本工具/zip 校验解压/exe 定位单元测试 + 拉起真实服务的集成测试，集成用例对花妖缺失环境自适应降级）——改核心逻辑后运行。改代码后需重启 node 进程。
-- **调试**：`data/logs/control.log`（已 gitignore）记录每次 click/input/shot 的坐标、耗时、结果与安全闸判定，是远程排查的第一入口；默认全量记录，`.env` 设 `CONTROL_LOG=0` 切静默模式（仅失败/拦截），超 1MB 自动滚动。调试协作模式：加日志 → 用户浏览器真实操作 → 读日志定位。
+- **无构建步骤；有 Lint 与测试**：`npm run lint`（ESLint 9 + `eslint.config.js`）——**每次改代码后必须清零**；`npm test`（vitest，tests/ 下 65 用例：单元(版本工具/zip 校验解压/exe 定位/live diff) + 前端(按花括号配对从 app.js **截取真实函数源码**执行，不引入 jsdom) + `protocol`(后端真实帧喂给前端真实解析函数，专治"两端字节序/偏移不一致") + `live-gear`/`live-idle`(档位自适应与空闲地板) + 拉起真实服务的集成测试，集成用例对花妖缺失环境自适应降级）——改核心逻辑后运行。改代码后需重启 node 进程。
+- **调试**：`data/logs/control.log`（已 gitignore）记录每次 ensure/click/input 的坐标、耗时、结果与安全闸判定，是远程排查的第一入口；默认全量记录，`.env` 设 `CONTROL_LOG=0` 切静默模式（仅失败/拦截），超 1MB 自动滚动。调试协作模式：加日志 → 用户浏览器真实操作 → 读日志定位。
 
 ## 架构
 
@@ -34,7 +34,7 @@ docs/     文档图片
 - `findRenderWidgetHwnd(hwnd)`：递归找 WebView2 渲染子窗口（类名 `Chrome_RenderWidgetHostHWND`）——**消息点击/键盘的唯一正确投递目标**，直接发主窗口对 WebView2 无效。
 - `clientOrigin(hwnd)`：`ClientToScreen` 求客户区原点。**必须传具体 hwnd**，漏传会得到 (0,0) 导致坐标全错（历史 bug）。
 - `clientClick(sx, sy)`：把截图像素坐标换算为 RWH 客户区坐标后 `PostMessage` 投递鼠标消息（MOUSEMOVE/BUTTONDOWN/BUTTONUP）。后台可送达，不移动真实鼠标、不抢焦点。
-- `captureFrame()`：按窗口抓帧（PrintWindow 路线，node-screenshots）。RDP 最小化后 Windows 挂起屏幕渲染，抓屏幕必黑，**按窗口抓取不受影响**。
+- `captureImage()`：按窗口抓帧（PrintWindow 路线，node-screenshots），返回未编码的原始像素，编码(JPEG)与裁剪由 live.js 决定。RDP 最小化后 Windows 挂起屏幕渲染，抓屏幕必黑，**按窗口抓取不受影响**。
 - `sendTextInput(sx, sy, text, append)`：**纯消息文本输入（v3，当前方案）**——消息点击定位光标 → append：END 键移到末尾；clear：三击全选（第 2/3 击用 `WM_LBUTTONDBLCLK`，间隔须在双击窗口内）→ 逐字符 `WM_CHAR`。毫秒级、不依赖系统焦点、任何遮挡状态不受影响。
 
 **消息输入的边界（实测结论，勿走回头路）**：
@@ -52,11 +52,11 @@ docs/     文档图片
 
 `app.listen()` 返回的 http.Server 直接交给 `initLive()` 挂 WS。业务能力全部在同级模块，路由内只做编排与响应。`/api/*` 统一挂 `Cache-Control: no-store`；兜底错误中间件处理 JSON 解析失败(400)与未捕获异常(500)。
 
-- `POST /api/control/shot`：确保花妖在运行（`ensureGardenRunning`：当前版本 exe 路径精确匹配，异常时重启；未安装返回 `notInstalled` 供前端安装引导）→ **内存抓帧不落盘** → 返回窗口矩形 + base64 PNG（`image` 字段，前端直接 `img.src='data:image/png;base64,'` 渲染，省一次 GET 往返）。
-- `POST /api/control/click`：`{x,y,noimg?}`（截图像素坐标）→ `clientClick` + `noteActivity()`。**noimg=true（实时模式）时跳过等待与抓帧直接秒回**（实测 ~40ms），画面由实时突发帧呈现；否则等待+重截图返回 image，形成"所见即所得"闭环。窗口移动不影响映射（每次实时求原点）。
-- `POST /api/control/input`：`{x,y,text,clear,noimg?}` → **先跑安全闸**（`uia-probe`，不可编辑则拒绝且一个消息都不发；**同点位结果缓存 4s**，命中时省去 ~700ms PS 冷启动，实测后续探测 3ms）→ `sendTextInput`（内置 ~0.5-0.7s 消息节奏等待）+ `noteActivity()`；noimg 时无截图返回，前端发送按钮显示"发送中…"加载态；否则重截图反馈。
+- `POST /api/garden/ensure`：确保花妖在运行（`ensureGardenRunning`：当前版本 exe 路径精确匹配，异常时重启；未安装返回 `notInstalled` 供前端安装引导；刚拉起未就绪返回 `autoStarted` 提示）。**不返回画面**——画面唯一来源是 WS 实时通道。原 `/api/control/shot` 已于 2026-09-07 移除：它与 WS 首帧重复（首屏曾白付 REST base64 36KB + WS 全帧 27.5KB 两遍），且"REST 图覆盖 canvas"会引入基准不一致的额外复杂度。
+- `POST /api/control/click`：`{x,y}`（截图像素坐标）→ `clientClick` + `noteActivity()` → **秒回**（实测 ~40ms）。画面由实时突发帧呈现，**响应不再带 image**（原 `noimg` 参数随 REST 取图一并移除）。窗口移动不影响映射（每次实时求原点）。
+- `POST /api/control/input`：`{x,y,text,clear}` → **先跑安全闸**（`uia-probe`，不可编辑则拒绝且一个消息都不发；**同点位结果缓存 4s**，命中时省去 ~700ms PS 冷启动，实测后续探测 3ms）→ `sendTextInput`（内置 ~0.5-0.7s 消息节奏等待）+ `noteActivity()`。前端发送按钮在此期间**显示"发送中…"并禁用**（安全闸探测本身就要 ~700ms，加载态不可省），画面由实时突发帧呈现，响应不带 image。
 - `POST /api/control/restart` / `GET|POST /api/garden/update`：重启与版本更新（下载 zip → yauzl 校验解压 → `netsh advfirewall` 预放行防火墙 → 拉起 → 写 `data/garden/version.json`；启动失败回滚旧版）。
-- **`WS /api/live`（实时画面，live.js）**：**常开，前端无开关按钮**（实时是唯一画面模式）。轮询抓帧 + **变化才发帧**——原始 BGRA 隔点采样哈希（~1ms），画面没变只发 13 字节跳帧心跳，挂机静态画面近零流量。二进制帧格式 `[u8 flags][u32 seq][u32 ts][u16 w][u16 h] + JPEG`（flags&1=跳帧）；控制消息 JSON（start/gear/stop/refresh/stats ↔ gear/error）。三档轮询 eco 2s / mid 0.5s / fast 0.2s（**无档位按钮，档位决策完全在服务端**：客户端每 5s 上报帧到达间隔，服务端与**自己实际调度的间隔**比对——>2.5× 降一档（1 个周期即降），<1.3× 且非空闲 连续 2 周期升一档（迟滞防振荡），空闲 3 分钟地板期禁止升档。**为什么必须在服务端决策**：到达间隔由服务端调度节奏决定，客户端无法区分"空闲地板慢"与"网络慢"；且 stats 消息不得刷新 lastActivity，否则空闲地板永不生效——这两点曾导致"挂机升档+降不回来"的双 bug）。当前档位以信号条徽标浮动在画布右上角（1-3 格 = 省流/均衡/流畅，`pointer-events:none` 不挡操作）；**操作反馈帧主动推送**——`noteActivity()` 触发所有客户端 ~140ms（渲染器消化操作）后立即抓帧推送，实测点击→看到结果稳定 174ms（旧轮询机制为 15~215ms 随机）；REST 点击/输入成功调 `noteActivity()` 触发全客户端 2s 突发（200ms），WS 的 `refresh` op 等价；空闲 3 分钟（`LIVE_IDLE_MS` 可配）把轮询抬到省流档**并强制降档为 eco 通知客户端**（徽标同步 1 格；此前只抬间隔不改档位，导致徽标停在满格——自适应基准被地板抬高后降档分支永不触发），交互后由自适应自动爬升；客户端积压 >512KB 暂缓发帧（背压）。**实时是唯一模式**（常开无任何控件；首帧就绪后自动连接，断线自动重连）：WS 连接期间点击/输入带 `noimg:true` 秒回、无加载蒙层，涟漪+突发帧承担反馈；WS 断开期间自动回退旧的"等图+蒙层"路径。刷新按钮已移除——`doShot` 仅用于首次加载与重启/更新后的程序化刷新（实时连接中会转为 refresh 突发）。前端用 `URL.createObjectURL(blob)` 渲染，复用现有缩放/点击映射。JPEG 编码用 node-screenshots 原生 `toJpeg()`（q 固定 ~75，实测 51KB/帧、5-9ms），不引图像处理依赖。
+- **`WS /api/live`（实时画面，live.js）**：**常开，前端无开关按钮**（实时是唯一画面模式）。轮询抓帧 + **变化才发帧**——**全量像素比对**（~3ms，单趟扫描同时给出变化区域最小包围盒）。替代了原先的隔点采样哈希：它只覆盖 0.073% 字节，几十像素的小变化（数字/进度）有 7 成概率被判为"没变"而不推帧（画面卡住不刷新）。画面没变只发 13 字节跳帧心跳，挂机静态画面近零流量；变化则**只发变化区域（脏矩形补丁）**——实测一个数字变化 684B、1/3 屏 3832B，而全帧约 27KB（整屏全变时才发全帧，永不比全帧更差）。2026-09-07 重启后复测（fast 档 12s）：1 个全帧 27583B + 50 个补丁均 1156B，含首帧合计 6.95KB/s；补丁区域约 31x33 像素，说明几十像素的小变化（右上角状态/时间）已被稳定捕获，且抽查补丁矩形全部落在画面内（无越界）。二进制帧格式 `[u8 flags][u32 seq][u32 ts][u16 w][u16 h] (+补丁时 [u16 x][u16 y][u16 w][u16 h]) + JPEG`，w/h 恒为整幅尺寸；flags&1=跳帧、&2=全帧（关键帧）、&4=补丁帧；控制消息 JSON（start/gear/stop/refresh/stats/keyframe ↔ gear/error）；**`stop` = 页面切后台**：客户端置 `paused` 并停掉轮询（`kick`/`tick` 均跳过），**连接保持**；回前台发 `start` 恢复。旧做法是切后台直接断开、回前台重连——重连必收一次 27.5KB 全帧 + 握手 + 2s 延迟，而后台期间的流量（静止只 13B 心跳、变化时 eco 档约 0.575KB/s）要 48 秒才抵得上一次全帧，断连反倒更费且多等。**关键帧时机**：首帧、尺寸变化、抓帧出错后、变化超整屏 90%、连续 120 个补丁或累计补丁面积超 2.5 屏（防 JPEG 反复局部覆盖的画质漂移）、客户端基准失效时兜底索要（op keyframe，前端已不再因 REST 取图而索要）。不变式：`st.lastRaw` 恒等于客户端 canvas 内容——只在真正发出帧后更新，故背压漏发不会错位。三档轮询 eco 2s / mid 0.5s / fast 0.2s（**无档位按钮，档位决策完全在服务端**：客户端每 5s 上报帧到达间隔，服务端与**自己实际调度的间隔**比对——>2.5× 降一档（1 个周期即降），<1.3× 且非空闲 连续 2 周期升一档（迟滞防振荡），空闲 3 分钟地板期禁止升档。**为什么必须在服务端决策**：到达间隔由服务端调度节奏决定，客户端无法区分"空闲地板慢"与"网络慢"；且 stats 消息不得刷新 lastActivity，否则空闲地板永不生效——这两点曾导致"挂机升档+降不回来"的双 bug）。当前档位以信号条徽标浮动在画布右上角（1-3 格 = 省流/均衡/流畅，`pointer-events:none` 不挡操作）；**操作反馈帧主动推送**——`noteActivity()` 触发所有客户端 ~140ms（渲染器消化操作）后立即抓帧推送，实测点击→看到结果稳定 174ms（旧轮询机制为 15~215ms 随机）；REST 点击/输入成功调 `noteActivity()` 触发全客户端 2s 突发（200ms），WS 的 `refresh` op 等价；空闲 3 分钟（`LIVE_IDLE_MS` 可配）把轮询抬到省流档**并强制降档为 eco 通知客户端**（徽标同步 1 格；此前只抬间隔不改档位，导致徽标停在满格——自适应基准被地板抬高后降档分支永不触发），交互后由自适应自动爬升；客户端积压 >512KB 暂缓发帧（背压）。**实时是唯一模式**（常开无任何控件；首帧就绪后自动连接，断线自动重连）：WS 连接期间点击/输入带 `noimg:true` 秒回、无加载蒙层，涟漪+突发帧承担反馈；WS 断开期间自动回退旧的"等图+蒙层"路径。刷新按钮已移除——`doShot` 仅用于首次加载与重启/更新后的程序化刷新（实时连接中会转为 refresh 突发）。前端用 **canvas 合成**（`#ctrlImg` 是 `<canvas>`）：全帧 `drawImage` 铺满，补丁帧按 x/y 叠加到已有画面上；解码异步故上屏动作串行排队保序（乱序叠加会画错）。**帧头必须按小端解析**（`getUint16(off, true)`）：服务端 `writeUInt16LE` 写入，漏传 littleEndian 会把 390 读成 34305 → w/h 与 canvas 不符 → 补丁帧被判"基准失效"全部丢弃并反复索要关键帧 → 退化成每帧 27.5KB 全帧（实测 45KB/s；修复后 68s 长跑为 3 个全帧 + 261 个补丁 = 5.5KB/s），缩放/平移/点击映射沿用元素 rect，与 `<img>` 时代一致。**位图尺寸必须在 `bmp.close()` 之前取**——`ImageBitmap.close()` 后 `width/height` 归零，曾致 `imgNatural={0,0}` → `renderInfo()` 恒 null → 点击/缩放/平移全失效而画面照常显示（隐蔽，由 tests/frontend-paint.test.js 守着）。JPEG 编码用 node-screenshots 原生 `toJpeg()` / 裁剪 `cropSync().toJpegSync()`（q 固定 ~75，实测全帧约 27KB/帧（早期记的 9.9KB 是更简单的画面，已更正）、编码 5-9ms），不引图像处理依赖。
 - 操作日志 `logControl()` → `data/logs/control.log`；配置项见 `.env.example`（`GARDEN_DOWNLOAD_URL` 无默认值，真实下载源属敏感信息不入库）。
 
 ### garden.js —— 花妖进程/生命周期/安装状态/版本记录
@@ -78,6 +78,6 @@ docs/     文档图片
 ## 关键约束
 
 - 花妖窗口标题固定 `"花妖"`（**精确相等匹配**，防止误抓标题含"花妖"的浏览器窗口；客户端区约 390x844）；花妖安装目录为 `data/garden/`（含 version.json, 其中记录各版本 exe 的绝对路径）。
-- 截图**不落盘**：抓帧在内存中完成，base64 随 API 响应直出，无 screenshots/ 目录。
+- 抓帧**不落盘**：在内存中完成并直接由 WS 推送，无 screenshots/ 目录；**没有任何 REST 接口返回图片**（画面唯一来源 = WS 实时通道）。
 - `.codebuddy/`、`data/`、`.env` 均已 gitignore；**绝不提交任何真实下载源/凭证**。
 - 依赖保持最小集（express/koffi/node-screenshots/ws/yauzl），新增能力优先考虑"系统能力 + 消息机制"，引入新 npm 依赖或任何需要编译的东西前必须与用户确认。

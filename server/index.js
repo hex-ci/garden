@@ -31,49 +31,28 @@ app.use(express.json({ limit: '1mb' }));
 // 所有 API 响应禁用缓存, 避免浏览器缓存接口结果
 app.use('/api', (req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
 
-// 抓帧到内存, 返回 { rect: {x,y,w,h}, png: Buffer }
+// 输入安全闸结果缓存
 let probeCache = { key: '', at: 0, result: null };
 
-async function captureShot() {
-  const frame = await capture.captureFrame();
-
-  return {
-    rect: {
-      x: frame.origin.x,
-      y: frame.origin.y,
-      w: frame.width,
-      h: frame.height,
-    },
-    png: frame.png,
-  };
-}
-
 // ---- 操控 API ----
-// 刷新画面: 确保花妖在运行(未安装/程序丢失返回引导标记)后抓帧
-app.post('/api/control/shot', async (req, res) => {
+// 确保花妖在运行: 未安装/程序文件丢失返回引导标记。
+// 画面一律由 WS 实时通道推送, 这里不再截图
+app.post('/api/garden/ensure', async (req, res) => {
   const ensured = await ensureGardenRunning();
   if (ensured.notInstalled) {
     return res.json({ ok: false, notInstalled: true, reason: ensured.reason, message: ensured.error });
   }
-  // 刚拉起但窗口尚未就绪: 不截图, 提示稍后刷新, 避免截到未启动完的画面
+  // 刚拉起但窗口尚未就绪: 提示稍后, 实时通道就绪后会自动出画面
   if (ensured.started && !ensured.ready) {
     return res.json({ ok: false, autoStarted: true, message: '花妖正在启动，请稍后再刷新画面' });
   }
-  try {
-    const ts0 = Date.now();
-    const cap = await captureShot();
-    logControl(`shot ok capMs=${Date.now() - ts0} rect=${cap.rect.x},${cap.rect.y} ${cap.rect.w}x${cap.rect.h}`);
-    res.json({
-      ok: true,
-      message: '画面已刷新',
-      rect: cap.rect,
-      image: cap.png.toString('base64'),
-      ...(ensured.started ? { autoStarted: true } : {}),
-      ...(ensured.error ? { ensureError: ensured.error } : {}),
-    });
-  } catch (e) {
-    res.status(500).json({ ok: false, message: '截图失败: ' + e.message });
-  }
+  logControl(`ensure ok started=${!!ensured.started}${ensured.error ? ' err=' + ensured.error : ''}`);
+  res.json({
+    ok: true,
+    message: ensured.started ? '花妖已启动' : '花妖在运行',
+    autoStarted: !!ensured.started,
+    ...(ensured.error ? { ensureError: ensured.error } : {}),
+  });
 });
 
 // 重启花妖: 结束进程后重新启动当前版本(复用 killGardenProcesses + ensureGardenRunning)
@@ -102,7 +81,7 @@ app.post('/api/control/restart', async (req, res) => {
   });
 });
 
-// 消息点击(后台可送达)。实时模式(noimg)下跳过等待与抓帧: 秒回确认, 画面由实时突发帧呈现
+// 消息点击
 app.post('/api/control/click', async (req, res) => {
   const x = Math.round(Number(req.body.x));
   const y = Math.round(Number(req.body.y));
@@ -112,27 +91,17 @@ app.post('/api/control/click', async (req, res) => {
   try {
     const t0 = Date.now();
     capture.clientClick(x, y);
-    noteActivity();   // 实时画面短时突发提速
-    if (req.body.noimg === true) {
-      logControl(`click(${x},${y}) ok noimg total=${Date.now() - t0}ms`);
-      return res.json({ ok: true, message: '已点击 (' + x + ',' + y + ')' });
-    }
-    await sleep(150);
-    const cap = await captureShot();
+    // 实时画面短时突发提速
+    noteActivity();
     logControl(`click(${x},${y}) ok total=${Date.now() - t0}ms`);
-    res.json({
-      ok: true,
-      message: '已点击 (' + x + ',' + y + ')',
-      rect: cap.rect,
-      image: cap.png.toString('base64'),
-    });
+    res.json({ ok: true, message: '已点击 (' + x + ',' + y + ')' });
   } catch (e) {
     logControl(`click(${x},${y}) FAIL ${e.message}`);
     res.status(500).json({ ok: false, message: '点击失败: ' + e.message });
   }
 });
 
-// 文本输入: 安全闸(只读探测)通过后才发消息; noimg 模式秒回, 画面由实时突发帧呈现
+// 文本输入: 安全闸通过后才发消息; 画面由实时突发帧呈现
 app.post('/api/control/input', async (req, res) => {
   const x = Math.round(Number(req.body.x));
   const y = Math.round(Number(req.body.y));
@@ -171,21 +140,10 @@ app.post('/api/control/input', async (req, res) => {
     }
     // 纯消息文本输入(点击+END/三击全选+WM_CHAR), 后台可送达, 不抢系统焦点
     await capture.sendTextInput(x, y, req.body.text, !clear);
-    noteActivity();   // 实时画面短时突发提速
-    if (req.body.noimg === true) {
-      logControl(`input(${x},${y}) clear=${clear} ok noimg total=${Date.now() - t0}ms`);
-      return res.json({ ok: true, message: '文本已发送' + (clear ? '(已清空)' : '') });
-    }
-    await sleep(250);   // 让渲染器消化输入后再抓帧反馈
-    const t1 = Date.now();
-    const cap = await captureShot();
-    logControl(`input(${x},${y}) clear=${clear} ok msg total=${Date.now() - t0}ms capMs=${Date.now() - t1}`);
-    res.json({
-      ok: true,
-      message: '文本已发送' + (clear ? '(已清空)' : ''),
-      rect: cap.rect,
-      image: cap.png.toString('base64'),
-    });
+    // 实时画面短时突发提速
+    noteActivity();
+    logControl(`input(${x},${y}) clear=${clear} ok total=${Date.now() - t0}ms`);
+    res.json({ ok: true, message: '文本已发送' + (clear ? '(已清空)' : '') });
   } catch (e) {
     logControl(`input(${x},${y}) FAIL ${e.message}`);
     res.status(500).json({ ok: false, message: '文本输入失败: ' + e.message });
